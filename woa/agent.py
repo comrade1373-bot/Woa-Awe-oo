@@ -68,7 +68,10 @@ _HELP = re.compile(
     re.IGNORECASE,
 )
 _SELF_STATUS = re.compile(
-    r"^(?:who are you|what are you|what is mewtronic|what does mewtronic mean|"
+    r"^(?:who are you|what are you|what(?:'s| is) your name|tell me your name|"
+    r"what is mewtronic|what does mewtronic mean|"
+    r"what(?:'s| is) (?:the )?digital atmosphere(?: like)?|"
+    r"what can you sense locally|"
     r"are you (?:self[- ]aware|conscious)|what do you know about your environment|"
     r"what resources are available locally|what can you do)[?.!]*$",
     re.IGNORECASE,
@@ -158,7 +161,7 @@ class LocalAgent:
         return (
             "You can ask naturally, or use /calc EXPR, /search QUERY, "
             "/digest QUERY, /solve EQUATION, /entropy TEXT, /about, "
-            "/cues TEXT, or /tool NAME JSON. Local tools:\n"
+            "/atmosphere, /cues TEXT, or /tool NAME JSON. Local tools:\n"
             + tools
         )
 
@@ -220,24 +223,34 @@ class LocalAgent:
             additional = result["additional_sources_not_listed"]
             if additional:
                 sources += f", and {additional} more"
+            available_memory = result["system_memory_bytes"]
+            memory_status = (
+                f"{available_memory / 1024**3:.1f} GiB available"
+                if available_memory is not None
+                else "not reported"
+            )
             return (
-                "I am Woa, a local AI assistant. I am not conscious or "
-                "self-aware. “Mewtronic” is this project's name for composing "
+                "I'm Woa, a local software assistant. I don't have biological "
+                "senses or feelings; this report uses only local app and "
+                "hardware signals. “Mewtronic” is this project's name for composing "
                 "the local model, bundled and explicitly indexed knowledge, "
                 "and registered local tools; it does not mean I inspect the "
                 "whole computer.\n"
                 f"Model checkpoint: {checkpoint_status}. "
-                f"Compute: {result['compute_device']} on {result['platform']}.\n"
+                f"Compute: {result['compute_device']} on {result['platform']}; "
+                f"{result['cpu_count']} logical CPUs; memory: {memory_status}.\n"
                 f"Indexed documents ({result['indexed_document_count']}): "
                 f"{sources}.\n"
-                f"Local tools: {', '.join(result['local_tools']) or 'none'}."
+                f"Local tools: {', '.join(result['local_tools']) or 'none'}.\n"
+                "Network observation: local app only; no external systems or "
+                "data brokers are monitored."
             )
         return json.dumps(result, ensure_ascii=False, sort_keys=True)
 
     def _run_slash_command(self, command, argument):
         if command in {"/tools", "/help", "/commands"}:
             return self._help()
-        if command == "/about":
+        if command in {"/about", "/atmosphere"}:
             return self._run_tool("local_environment", {})
         if command == "/cues":
             if not argument.strip():

@@ -17,6 +17,7 @@ from .corpus import download_starter_corpus
 from .datasets import (
     build_preference_examples,
     build_sft_examples,
+    create_synthetic_sft_dataset,
     load_chat_records,
     load_preference_records,
 )
@@ -426,6 +427,21 @@ def main():
     sft_parser.add_argument("--warmup-steps", type=int, default=20)
     sft_parser.add_argument("--checkpoint-interval", type=int, default=100)
     sft_parser.add_argument("--resume", action="store_true")
+    synthetic_parser = subparsers.add_parser(
+        "make-synthetic",
+        help="create original Woa instruction examples for local SFT",
+    )
+    synthetic_parser.add_argument(
+        "--output",
+        default=str(data_directory() / "corpora" / "woa-synthetic-sft.jsonl"),
+    )
+    synthetic_parser.add_argument(
+        "--arithmetic-examples",
+        type=int,
+        default=32,
+        help="number of varied calculator tool examples to add",
+    )
+    synthetic_parser.add_argument("--seed", type=int, default=1337)
     dpo_parser = subparsers.add_parser(
         "dpo", help="preference-tune a project model on chosen/rejected JSONL pairs"
     )
@@ -514,6 +530,20 @@ def main():
         run_desktop()
     elif args.command == "chat":
         return interactive_chat()
+    elif args.command == "make-synthetic":
+        try:
+            result = create_synthetic_sft_dataset(
+                args.output,
+                arithmetic_examples=args.arithmetic_examples,
+                seed=args.seed,
+            )
+        except (OSError, ValueError) as error:
+            print(f"Synthetic dataset creation failed: {error}")
+            return 1
+        print(
+            f"Created {result['examples']} original SFT examples at {result['path']}. "
+            "Review the data before training."
+        )
     elif args.command == "train":
         store = Store()
         profile = detect_hardware()

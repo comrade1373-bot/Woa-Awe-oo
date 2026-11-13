@@ -29,6 +29,7 @@ from woa.corpus import _nasa_abstract_text, _world_bank_text, download_starter_c
 from woa.datasets import (
     build_preference_examples,
     build_sft_examples,
+    create_synthetic_sft_dataset,
     load_chat_records,
     load_preference_records,
 )
@@ -401,6 +402,10 @@ class ToolTests(unittest.TestCase):
             self.assertIn("not conscious", about.lower())
             self.assertIn("Mewtronic", about)
             self.assertIn("facts.txt", about)
+            self.assertIn(
+                "I am Woa",
+                agent.reply([{"role": "user", "content": "What's your name?"}]),
+            )
             self.assertEqual(
                 agent.reply([{"role": "user", "content": "Hello"}]),
                 "model response",
@@ -411,6 +416,28 @@ class ToolTests(unittest.TestCase):
 
 
 class CliKnowledgeTests(unittest.TestCase):
+    def test_make_synthetic_cli_creates_reviewable_sft_jsonl(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output_path = Path(directory) / "woa-synthetic.jsonl"
+            with patch.object(
+                sys,
+                "argv",
+                [
+                    "woa",
+                    "make-synthetic",
+                    "--output",
+                    str(output_path),
+                    "--arithmetic-examples",
+                    "2",
+                ],
+            ):
+                with contextlib.redirect_stdout(io.StringIO()) as output:
+                    self.assertEqual(cli_main(), 0)
+
+            records = load_chat_records([output_path])
+            self.assertEqual(len(records), 12)
+            self.assertIn("original SFT examples", output.getvalue())
+
     def test_start_seeds_bundled_sources_before_launching_client(self):
         with tempfile.TemporaryDirectory() as directory:
             with patch.dict(os.environ, {"WOA_DATA_DIR": directory}):
@@ -656,6 +683,41 @@ class FoundationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "n_heads"):
             ModelConfig(n_heads=0)
 
+    def test_inference_prompt_keeps_recent_turns_and_fits_model_context(self):
+        from woa.training import _build_inference_prompt
+
+        tokenizer = ByteTokenizer()
+        prompt = _build_inference_prompt(
+            [
+                {"role": "user", "content": "old question " * 12},
+                {"role": "assistant", "content": "old answer " * 12},
+                {"role": "user", "content": "recent question"},
+                {"role": "assistant", "content": "recent answer"},
+                {"role": "user", "content": "current request"},
+            ],
+            context_length=128,
+        )
+        decoded = tokenizer.decode(prompt)
+
+        self.assertLessEqual(len(prompt), 128)
+        self.assertIn("You are Woa", decoded)
+        self.assertIn("recent answer", decoded)
+        self.assertIn("current request", decoded)
+        self.assertNotIn("old question", decoded)
+
+    def test_inference_prompt_truncates_long_unicode_user_input_safely(self):
+        from woa.training import _build_inference_prompt
+
+        tokenizer = ByteTokenizer()
+        prompt = _build_inference_prompt(
+            [{"role": "user", "content": "🌍" * 100}],
+            context_length=64,
+        )
+
+        self.assertLessEqual(len(prompt), 64)
+        self.assertNotIn("\ufffd", tokenizer.decode(prompt))
+        self.assertGreater(tokenizer.decode(prompt).count("🌍"), 0)
+
     def test_batch_size_and_cosine_schedule_are_bounded(self):
         self.assertEqual(
             recommended_batch_size({"device": "cuda", "total_memory_bytes": 8 * 2**30}),
@@ -743,6 +805,38 @@ class FoundationTests(unittest.TestCase):
             self.assertEqual(len(examples), 1)
             self.assertTrue(any(examples[0]["chosen"]["response_mask"]))
             self.assertTrue(any(examples[0]["rejected"]["response_mask"]))
+
+    def test_synthetic_sft_data_is_reproducible_and_refuses_overwrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            first = Path(directory) / "first.jsonl"
+            second = Path(directory) / "second.jsonl"
+            first_result = create_synthetic_sft_dataset(
+                first,
+                arithmetic_examples=6,
+                seed=23,
+            )
+            second_result = create_synthetic_sft_dataset(
+                second,
+                arithmetic_examples=6,
+                seed=23,
+            )
+
+            self.assertEqual(first_result["examples"], 16)
+            self.assertEqual(second_result["examples"], 16)
+            self.assertEqual(
+                first.read_text(encoding="utf-8"),
+                second.read_text(encoding="utf-8"),
+            )
+            self.assertTrue(
+                any(
+                    message["content"].startswith("<tool>calculator ")
+                    for conversation in load_chat_records([first])
+                    for message in conversation
+                    if message["role"] == "assistant"
+                )
+            )
+            with self.assertRaises(FileExistsError):
+                create_synthetic_sft_dataset(first, arithmetic_examples=0)
 
     def test_remote_dataset_url_requires_exact_allowlist_and_public_dns(self):
         public_result = [

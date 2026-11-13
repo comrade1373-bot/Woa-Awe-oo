@@ -437,6 +437,13 @@ def build_tool_bus(knowledge, runtime=None):
             ),
             "platform": platform.platform(),
             "compute_device": hardware["device"],
+            "cpu_count": hardware["cpu_count"],
+            "system_memory_bytes": hardware["system_memory_bytes"],
+            "external_network_monitoring": False,
+            "observation_scope": (
+                "Local app status, detected hardware, and explicitly indexed "
+                "knowledge only."
+            ),
             "indexed_document_count": len(documents),
             "indexed_sources": sources,
             "additional_sources_not_listed": max(0, len(documents) - len(sources)),
@@ -449,7 +456,7 @@ def build_tool_bus(knowledge, runtime=None):
 
     bus.register(
         "local_environment",
-        "Report the local assistant, model, indexed knowledge, and tools without scanning files.",
+        "Report local app and hardware status and explicitly indexed knowledge; do not scan files or external networks.",
         {"type": "object", "properties": {}, "required": []},
         lambda: local_environment(),
     )

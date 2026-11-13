@@ -1,4 +1,5 @@
 import json
+import random
 from pathlib import Path
 
 from .tokenizer import ByteTokenizer
@@ -58,6 +59,116 @@ def load_chat_records(paths):
     if not records:
         raise ValueError("Instruction dataset contains no conversation records.")
     return records
+
+
+def create_synthetic_sft_dataset(output_path, *, arithmetic_examples=32, seed=1337):
+    if (
+        not isinstance(arithmetic_examples, int)
+        or isinstance(arithmetic_examples, bool)
+        or not 0 <= arithmetic_examples <= 10_000
+    ):
+        raise ValueError("arithmetic_examples must be an integer from 0 to 10000.")
+    if not isinstance(seed, int) or isinstance(seed, bool):
+        raise ValueError("seed must be an integer.")
+
+    def record(user, assistant):
+        return {
+            "messages": [
+                {"role": "user", "content": user},
+                {"role": "assistant", "content": assistant},
+            ]
+        }
+
+    records = [
+        record(
+            "What's your name?",
+            "I'm Woa, a local assistant. I can help explain ideas, work through "
+            "supported calculations, and search documents you choose to index.",
+        ),
+        record(
+            "Can you browse the web or inspect my computer?",
+            "No. I can only use the local tools and documents made available to "
+            "this app. Web access is not part of chat, and I do not scan your files.",
+        ),
+        record(
+            "Are you conscious?",
+            "No. I'm software running as a local assistant; I don't have "
+            "consciousness or personal experiences.",
+        ),
+        record(
+            "I don't understand this yet. Can you help?",
+            "Of course. Tell me which part is unclear, and we can break it into "
+            "smaller steps. I can explain another way if the first one doesn't help.",
+        ),
+        record(
+            "I think that answer may be wrong.",
+            "Thanks for flagging it. I'll reconsider the claim, separate what I "
+            "can verify from what I'm unsure about, and correct it if needed.",
+        ),
+        record(
+            "What should I learn next?",
+            "Let's choose a useful next step. What are you trying to accomplish, "
+            "what do you already know, and how much time can you spend?",
+        ),
+        record(
+            "Can you summarize my documents about logistics?",
+            "<tool>knowledge_digest "
+            '{"query":"logistics"}</tool>',
+        ),
+        record(
+            "Find information about orbital mechanics in my local notes.",
+            "<tool>knowledge_search "
+            '{"query":"orbital mechanics"}</tool>',
+        ),
+        record(
+            "Solve x**2 - 5*x + 6 = 0.",
+            "<tool>algebraic_solve "
+            '{"equation":"x**2 - 5*x + 6 = 0"}</tool>',
+        ),
+        record(
+            "Measure the Shannon entropy of the text hello world.",
+            "<tool>information_entropy "
+            '{"text":"hello world"}</tool>',
+        ),
+    ]
+
+    rng = random.Random(seed)
+    operators = {"+": "plus", "-": "minus", "*": "times"}
+    question_templates = (
+        "What is {left} {word} {right}?",
+        "Please calculate {expression}.",
+        "Could you work out {expression} for me?",
+    )
+    operator_symbols = tuple(operators)
+    for index in range(arithmetic_examples):
+        symbol = operator_symbols[index % len(operator_symbols)]
+        left = rng.randint(1, 25)
+        right = rng.randint(1, 25)
+        word = operators[symbol]
+        expression = f"{left} {symbol} {right}"
+        question = rng.choice(question_templates).format(
+            left=left,
+            word=word,
+            right=right,
+            expression=expression,
+        )
+        arguments = json.dumps(
+            {"expression": expression},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        records.append(
+            record(question, f"<tool>calculator {arguments}</tool>")
+        )
+
+    output_path = Path(output_path).expanduser()
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("x", encoding="utf-8", newline="\n") as destination:
+        for item in records:
+            destination.write(
+                json.dumps(item, ensure_ascii=False, separators=(",", ":")) + "\n"
+            )
+    return {"path": str(output_path), "examples": len(records)}
 
 
 def build_sft_examples(records, context_length, tokenizer=None):

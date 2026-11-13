@@ -14,6 +14,12 @@ a tiny demo run; useful quality requires a large, well-curated, licensed corpus
 and substantial training compute. Training continuously or “without limits” is
 not possible on finite hardware.
 
+At inference, Woa keeps its local-assistant guidance and newest user message
+inside the checkpoint's context window, retaining recent turns before older
+history. Long messages are shortened safely to fit. The byte tokenizer is still
+the current format, so context size is measured in bytes rather than words;
+prompt guidance does not substitute for training or factual evaluation.
+
 The model architecture is recorded in each checkpoint, and
 `woa.model.register_architecture()` provides an extension point for future
 experimental architectures. Changing architecture code does not automatically
@@ -181,6 +187,19 @@ assistant to follow instructions. Prepare JSONL with one conversation per line:
 ```json
 {"messages":[{"role":"user","content":"What is 2 + 2?"},{"role":"assistant","content":"4"}]}
 ```
+
+For a small, original starter set covering Woa's identity, limitations,
+constructive clarification, and local tools, generate JSONL locally:
+
+```sh
+python -m woa make-synthetic \
+  --output ~/.woa-awe-oo/corpora/woa-synthetic-sft.jsonl \
+  --arithmetic-examples 32
+```
+
+This teaches response patterns and tool-call format, not general world
+knowledge. Review it and combine it with authorized, higher-quality examples
+before training.
 
 Then fine-tune only on assistant response tokens (the prompt tokens are
 context, not target labels):

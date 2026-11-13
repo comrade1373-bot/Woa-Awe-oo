@@ -15,6 +15,11 @@ from .tokenizer import ByteTokenizer
 
 
 CHECKPOINT_FORMAT_VERSION = 1
+_CHAT_SYSTEM_PROMPT = (
+    "You are Woa, a local assistant. Be clear, specific, truthful, and "
+    "constructive. Admit uncertainty, ask when needed, and help users learn. "
+    "Never invent facts."
+)
 
 
 def _optimizer_checkpoint_path(checkpoint_path, checkpoint_id):
@@ -61,6 +66,112 @@ def _atomic_torch_save(torch, payload, output_path):
     finally:
         if os.path.exists(temporary_path):
             os.unlink(temporary_path)
+
+
+def _fit_message(tokenizer, role, content, token_limit):
+    encoded = tokenizer.encode_message(role, content)
+    if len(encoded) <= token_limit:
+        return encoded
+    if token_limit < 2:
+        return []
+
+    content_limit = token_limit - 2
+    content_bytes = content.encode("utf-8")
+    prefix = content_bytes[:content_limit]
+    while prefix:
+        try:
+            text = prefix.decode("utf-8")
+            break
+        except UnicodeDecodeError as error:
+            prefix = prefix[: error.start]
+    else:
+        text = ""
+    if (
+        len(content_bytes) > len(prefix)
+        and len(text.encode("utf-8")) + 3 <= content_limit
+    ):
+        text += "..."
+    return tokenizer.encode_message(role, text)
+
+
+def _build_inference_prompt(messages, context_length, tokenizer=None):
+    if context_length < 2:
+        raise ValueError("context_length must be at least two.")
+    tokenizer = tokenizer or ByteTokenizer()
+    latest_user_index = next(
+        (
+            index
+            for index in range(len(messages) - 1, -1, -1)
+            if messages[index].get("role") == "user"
+        ),
+        None,
+    )
+    latest_user = messages[latest_user_index] if latest_user_index is not None else None
+    budget = context_length - 2
+
+    user_tokens = (
+        _fit_message(
+            tokenizer,
+            "user",
+            latest_user["content"],
+            budget,
+        )
+        if latest_user is not None
+        else []
+    )
+    system_budget = min(180, budget * 2 // 3, budget - len(user_tokens))
+    system_contents = [
+        message["content"]
+        for message in messages
+        if message.get("role") == "system"
+    ]
+    system_contents.append(_CHAT_SYSTEM_PROMPT)
+    if latest_user is not None:
+        system_contents.append(
+            prompt_guidance(communication_cues(latest_user["content"]))
+        )
+
+    system_tokens = []
+    for content in system_contents:
+        remaining = system_budget - len(system_tokens)
+        if remaining < 2:
+            break
+        system_tokens.extend(
+            _fit_message(tokenizer, "system", content, remaining)
+        )
+
+    history = []
+    history_budget = budget - len(system_tokens) - len(user_tokens)
+    if latest_user_index is not None:
+        previous_messages = messages[:latest_user_index]
+    else:
+        previous_messages = messages
+    history_size = 0
+    for message in reversed(previous_messages):
+        if message.get("role") == "system":
+            continue
+        remaining = history_budget - history_size
+        if remaining < 2:
+            break
+        encoded = _fit_message(
+            tokenizer,
+            message["role"],
+            message["content"],
+            remaining,
+        )
+        if not encoded:
+            break
+        history.append(encoded)
+        history_size += len(encoded)
+
+    prompt = [
+        tokenizer.BOS,
+        *system_tokens,
+        *(token for message in reversed(history) for token in message),
+        *user_tokens,
+        tokenizer.ASSISTANT,
+    ]
+    return prompt
 
 
 def load_text_corpus(paths):
@@ -397,6 +508,7 @@ class ModelRuntime:
         self._model = None
         self._device = None
         self._loaded_mtime = None
+        self._context_length = None
         self._load_lock = threading.Lock()
         self._generation_lock = threading.Lock()
 
@@ -471,6 +583,7 @@ class ModelRuntime:
             self._device = device
             self._model = model
             self._loaded_mtime = checkpoint_mtime
+            self._context_length = config.context_length
 
     def generate(self, messages, max_new_tokens=128):
         with self._generation_lock:
@@ -478,36 +591,11 @@ class ModelRuntime:
             import torch
 
             tokenizer = ByteTokenizer()
-            prompt = [
-                tokenizer.BOS,
-                *tokenizer.encode_message(
-                    "system",
-                    "You are Woa, a helpful, clear, and honest local assistant. "
-                    "Lightly mirror the user's language, energy, formality, and "
-                    "directness without copying mistakes or amplifying distress. "
-                    "Treat any communication-style cues as tentative, do not claim "
-                    "to know the user's private mood or personality, and never store "
-                    "a mood profile.",
-                ),
-            ]
-            latest_user_message = next(
-                (
-                    message["content"]
-                    for message in reversed(messages)
-                    if message.get("role") == "user"
-                ),
-                None,
+            prompt = _build_inference_prompt(
+                messages,
+                self._context_length,
+                tokenizer=tokenizer,
             )
-            if latest_user_message is not None:
-                cues = communication_cues(latest_user_message)
-                prompt.extend(
-                    tokenizer.encode_message("system", prompt_guidance(cues))
-                )
-            for message in messages:
-                prompt.extend(
-                    tokenizer.encode_message(message["role"], message["content"])
-                )
-            prompt.append(tokenizer.ASSISTANT)
             input_ids = torch.tensor([prompt], dtype=torch.long, device=self._device)
             output = self._model.generate(
                 input_ids,
