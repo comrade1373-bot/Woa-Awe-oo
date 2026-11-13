@@ -1,3 +1,4 @@
+import gzip
 import json
 import os
 import threading
@@ -26,6 +27,11 @@ def handler_for(store, runtime=None):
     agent = LocalAgent(runtime, tool_bus)
     conversation_locks = {}
     conversation_locks_guard = threading.Lock()
+    hardware = None
+    hardware_lock = threading.Lock()
+    web_page = None
+    web_page_gzip = None
+    web_page_lock = threading.Lock()
 
     class RequestHandler(BaseHTTPRequestHandler):
         server_version = "WoaAweOo/0.2"
@@ -75,8 +81,13 @@ def handler_for(store, runtime=None):
                 return False
 
         def do_GET(self):
+            nonlocal hardware
             path = urlparse(self.path).path
             if path == "/api/health":
+                if hardware is None:
+                    with hardware_lock:
+                        if hardware is None:
+                            hardware = detect_hardware()
                 self.send_json(
                     200,
                     {
@@ -86,7 +97,7 @@ def handler_for(store, runtime=None):
                         "model_backend": getattr(
                             runtime, "backend", "project_owned"
                         ),
-                        "hardware": detect_hardware(),
+                        "hardware": hardware,
                         "features": [
                             "shared_conversations",
                             "tool_bus",
@@ -132,8 +143,36 @@ def handler_for(store, runtime=None):
             self.send_json(404, {"error": "Not found."})
 
         def send_file(self, path, content_type):
+            nonlocal web_page, web_page_gzip
             try:
-                body = path.read_bytes()
+                with web_page_lock:
+                    if web_page is None:
+                        web_page = path.read_bytes()
+                    body = web_page
+                    compressed = False
+                    accepts_gzip = False
+                    for encoding in self.headers.get("Accept-Encoding", "").split(","):
+                        parts = encoding.split(";")
+                        if parts[0].strip().lower() != "gzip":
+                            continue
+                        quality = next(
+                            (
+                                parameter.split("=", 1)[1].strip()
+                                for parameter in parts[1:]
+                                if parameter.strip().lower().startswith("q=")
+                            ),
+                            "1",
+                        )
+                        try:
+                            accepts_gzip = float(quality) > 0
+                        except ValueError:
+                            accepts_gzip = False
+                        break
+                    if accepts_gzip:
+                        if web_page_gzip is None:
+                            web_page_gzip = gzip.compress(web_page)
+                        body = web_page_gzip
+                        compressed = True
             except OSError:
                 self.send_json(500, {"error": "The web app could not be loaded."})
                 return
@@ -141,6 +180,9 @@ def handler_for(store, runtime=None):
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Vary", "Accept-Encoding")
+            if compressed:
+                self.send_header("Content-Encoding", "gzip")
             self.end_headers()
             self.wfile.write(body)
 
@@ -216,7 +258,7 @@ def handler_for(store, runtime=None):
                         user_message = store.add_message(
                             conversation_id, "user", content.strip()
                         )
-                        history = store.list_messages(conversation_id)[-40:]
+                        history = store.list_messages(conversation_id, limit=40)
                         reply = agent.reply(history)
                         assistant_message = store.add_message(
                             conversation_id, "assistant", reply

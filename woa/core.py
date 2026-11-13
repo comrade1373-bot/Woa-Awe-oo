@@ -116,14 +116,29 @@ class Store:
             ).fetchall()
         return [dict(row) for row in rows]
 
-    def list_messages(self, conversation_id):
+    def list_messages(self, conversation_id, limit=None):
+        if limit is not None and (
+            not isinstance(limit, int) or isinstance(limit, bool) or limit < 1
+        ):
+            raise ValueError("Message limit must be a positive integer.")
         with self.connect() as db:
-            rows = db.execute(
-                "SELECT id, conversation_id, role, content, created_at "
-                "FROM messages WHERE conversation_id = ? "
-                "ORDER BY created_at, rowid",
-                (conversation_id,),
-            ).fetchall()
+            if limit is None:
+                rows = db.execute(
+                    "SELECT id, conversation_id, role, content, created_at "
+                    "FROM messages WHERE conversation_id = ? "
+                    "ORDER BY created_at, rowid",
+                    (conversation_id,),
+                ).fetchall()
+            else:
+                rows = db.execute(
+                    "SELECT id, conversation_id, role, content, created_at "
+                    "FROM ("
+                    "SELECT id, conversation_id, role, content, created_at, rowid "
+                    "FROM messages WHERE conversation_id = ? "
+                    "ORDER BY created_at DESC, rowid DESC LIMIT ?"
+                    ") ORDER BY created_at, rowid",
+                    (conversation_id, limit),
+                ).fetchall()
         return [dict(row) for row in rows]
 
     def add_message(self, conversation_id, role, content):

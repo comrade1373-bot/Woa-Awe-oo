@@ -91,21 +91,27 @@ def build_model(config=None):
             self.qkv = nn.Linear(config.d_model, 3 * config.d_model, bias=False)
             self.output = nn.Linear(config.d_model, config.d_model, bias=False)
             self.dropout = config.dropout
-
-        def apply_rope(self, value):
-            length = value.shape[-2]
             half_dim = self.head_dim // 2
             inv_freq = 1.0 / (
                 10000
                 ** (
-                    torch.arange(half_dim, device=value.device, dtype=torch.float32)
+                    torch.arange(half_dim, dtype=torch.float32)
                     / half_dim
                 )
             )
-            positions = torch.arange(length, device=value.device, dtype=torch.float32)
+            positions = torch.arange(config.context_length, dtype=torch.float32)
             angles = torch.outer(positions, inv_freq)
-            cos = angles.cos().to(value.dtype)[None, None, :, :]
-            sin = angles.sin().to(value.dtype)[None, None, :, :]
+            self.register_buffer(
+                "rope_cos", angles.cos()[None, None, :, :], persistent=False
+            )
+            self.register_buffer(
+                "rope_sin", angles.sin()[None, None, :, :], persistent=False
+            )
+
+        def apply_rope(self, value):
+            length = value.shape[-2]
+            cos = self.rope_cos[:, :, :length].to(dtype=value.dtype)
+            sin = self.rope_sin[:, :, :length].to(dtype=value.dtype)
             first, second = value.chunk(2, dim=-1)
             return torch.cat((first * cos - second * sin, second * cos + first * sin), dim=-1)
 

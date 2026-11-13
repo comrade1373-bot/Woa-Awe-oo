@@ -387,6 +387,7 @@ def train(
         if resume_checkpoint is not None
         else _existing_checkpoint_id(torch, output_path)
     )
+    window_offsets = torch.arange(config.context_length + 1)
 
     def save_checkpoint(completed):
         nonlocal previous_checkpoint_id
@@ -437,18 +438,9 @@ def train(
             indices = torch.randint(
                 0, token_ids.numel() - config.context_length, (batch_size,)
             )
-            inputs = torch.stack(
-                [
-                    token_ids[index : index + config.context_length]
-                    for index in indices.tolist()
-                ]
-            ).to(device)
-            targets = torch.stack(
-                [
-                    token_ids[index + 1 : index + config.context_length + 1]
-                    for index in indices.tolist()
-                ]
-            ).to(device)
+            windows = token_ids[indices.unsqueeze(1) + window_offsets].to(device)
+            inputs = windows[:, :-1]
+            targets = windows[:, 1:]
         else:
             indices = torch.randint(0, len(examples), (batch_size,)).tolist()
             batch_length = max(len(examples[index]["input_ids"]) for index in indices)

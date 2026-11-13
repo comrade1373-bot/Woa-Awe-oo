@@ -126,14 +126,12 @@ class KnowledgeIndex:
                         for index, piece in enumerate(document["pieces"], start=1)
                     ],
                 )
-                db.executemany(
+                db.execute(
                     "INSERT INTO knowledge_fts "
-                    "(rowid, source, chunk_index, content) VALUES (?, ?, ?, ?)",
-                    db.execute(
-                        "SELECT rowid, source, chunk_index, content "
-                        "FROM knowledge_chunks WHERE source = ?",
-                        (source,),
-                    ).fetchall(),
+                    "(rowid, source, chunk_index, content) "
+                    "SELECT rowid, source, chunk_index, content "
+                    "FROM knowledge_chunks WHERE source = ?",
+                    (source,),
                 )
                 results.append(
                     {

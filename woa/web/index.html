@@ -16,6 +16,8 @@
       --muted: #87a4aa;
       --accent: #67f4dc;
       --accent-soft: #36b9c3;
+      --accent-pink: #ff55ca;
+      --accent-blue: #63c9ff;
       --amber: #ffc878;
       --glow: 0 0 24px rgb(68 234 218 / 12%);
     }
@@ -27,8 +29,22 @@
       display: grid;
       grid-template-columns: 260px minmax(0, 1fr);
       background:
-        radial-gradient(ellipse at 68% 0%, rgb(33 109 111 / 16%), transparent 48%),
+        radial-gradient(ellipse at 78% 0%, rgb(33 109 111 / 16%), transparent 48%),
+        radial-gradient(ellipse at 8% 85%, rgb(144 35 118 / 10%), transparent 42%),
         linear-gradient(135deg, #091219, #080f15 60%, #0b151b);
+    }
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      z-index: 3;
+      pointer-events: none;
+      opacity: .1;
+      background: repeating-linear-gradient(
+        to bottom,
+        transparent 0 3px,
+        rgb(92 217 255 / 12%) 4px
+      );
     }
     aside {
       position: relative;
@@ -59,8 +75,8 @@
       border-radius: 50%;
       background:
         radial-gradient(circle, #dcfff8 0 8%, var(--accent) 10% 23%, transparent 26%),
-        conic-gradient(from 25deg, transparent 0 12%, var(--accent-soft) 13% 17%, transparent 18% 44%, var(--amber) 45% 49%, transparent 50%);
-      box-shadow: 0 0 16px rgb(103 244 220 / 36%), inset 0 0 9px rgb(103 244 220 / 18%);
+        conic-gradient(from 25deg, transparent 0 12%, var(--accent-soft) 13% 17%, transparent 18% 44%, var(--accent-pink) 45% 49%, transparent 50%);
+      box-shadow: 0 0 16px rgb(103 244 220 / 36%), 0 0 24px rgb(255 85 202 / 12%), inset 0 0 9px rgb(103 244 220 / 18%);
       animation: core-pulse 3.2s ease-in-out infinite;
     }
     .brand-kicker {
@@ -85,7 +101,10 @@
       box-shadow: 0 0 16px rgb(67 221 209 / 12%);
       transform: translateY(-1px);
     }
-    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:focus-visible, textarea:focus-visible, input:focus-visible, summary:focus-visible {
+      outline: 2px solid var(--accent-pink);
+      outline-offset: 3px;
+    }
     button:disabled { cursor: wait; opacity: .65; }
     #new-chat {
       width: 100%;
@@ -140,14 +159,44 @@
     body.compact-chat .message { margin-bottom: 10px; padding-block: 9px 10px; }
     body.compact-chat .message-head { margin-bottom: 4px; }
     body.large-chat-text .message > div:last-child { font-size: 1.08rem; line-height: 1.7; }
+    .tool-bar-heading {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 12px;
+      margin: 0 0 6px;
+      color: #d3e4e3;
+      font: 700 .7rem/1.3 ui-monospace, SFMono-Regular, Consolas, monospace;
+      letter-spacing: .1em;
+      text-transform: uppercase;
+    }
+    .tool-bar-heading small {
+      color: var(--accent);
+      font: inherit;
+      letter-spacing: .04em;
+    }
+    .tool-safety-note {
+      margin: 0 0 9px;
+      color: var(--muted);
+      font-size: .75rem;
+    }
+    .tool-tray { max-width: 840px; margin: 0 auto 9px; }
     #tool-actions {
       display: flex;
       flex-wrap: wrap;
       gap: 7px;
-      max-width: 840px;
-      margin: 0 auto 9px;
+      margin: 0;
     }
-    #tool-actions button { padding: 6px 9px; font-size: .88rem; }
+    #tool-actions button {
+      min-height: 40px;
+      padding: 6px 11px;
+      border-color: #31535f;
+      font-size: .88rem;
+    }
+    #tool-actions button:hover {
+      border-color: var(--accent-pink);
+      box-shadow: 0 0 16px rgb(255 85 202 / 13%);
+    }
     #conversations { display: grid; gap: 7px; }
     .conversation {
       position: relative;
@@ -175,6 +224,16 @@
       background: rgb(9 20 27 / 72%);
       font-size: .9rem;
       letter-spacing: .025em;
+    }
+    header::after {
+      content: "";
+      position: absolute;
+      bottom: -1px;
+      left: 0;
+      width: min(260px, 42vw);
+      height: 1px;
+      background: linear-gradient(90deg, var(--accent), var(--accent-pink), transparent);
+      box-shadow: 0 0 10px rgb(255 85 202 / 42%);
     }
     header::before {
       content: "";
@@ -413,7 +472,7 @@
       h1::before { width: 21px; height: 21px; }
       .brand-kicker { display: none; }
       #new-chat { width: auto; margin: 0; }
-      #knowledge-panel { display: none; }
+      #knowledge-panel { margin: 8px 0; }
       #interface-settings { margin: 9px 0; }
       #conversations { display: flex; overflow: auto; margin-top: 8px; }
       .conversation { max-width: 180px; }
@@ -425,7 +484,8 @@
       .welcome-orb { width: 92px; height: 92px; margin-bottom: 18px; }
       .composer { padding: 10px 12px max(12px, env(safe-area-inset-bottom)); }
       #tool-actions { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
-      #tool-actions button { flex: 0 0 auto; }
+      #tool-actions button { min-height: 44px; flex: 0 0 auto; }
+      .tool-bar-heading { font-size: .65rem; }
       form { gap: 7px; }
       textarea { min-height: 48px; padding: 10px; }
       #send { min-width: 68px; }
@@ -435,11 +495,11 @@
 <body>
   <aside>
     <h1>Woa</h1>
-    <div class="brand-kicker">MECHATRONIC ASSISTANT / LOCAL NODE</div>
+    <div class="brand-kicker">LOCAL ASSISTANT / ON-DEVICE NODE</div>
     <button id="new-chat" type="button">＋ New conversation</button>
     <details id="knowledge-panel">
       <summary>Local knowledge library</summary>
-      <p>Add UTF-8 text, Markdown, JSON, CSV, or source-code files. Files stay local.</p>
+      <p>Add UTF-8 text, Markdown, JSON, CSV, or source-code files. Files stay on this device.</p>
       <input id="knowledge-files" type="file" multiple
         accept=".txt,.md,.rst,.py,.json,.csv" aria-label="Add local knowledge files">
       <div id="knowledge-status" role="status"></div>
@@ -475,18 +535,28 @@
     <nav id="conversations" aria-label="Conversations"></nav>
   </aside>
   <main>
-    <header id="model-status" role="status">Connecting to local service…</header>
-    <div id="training-status" role="status">Loading local training telemetry…</div>
+    <header id="model-status" role="status">Connecting to your local assistant…</header>
+    <div id="training-status" role="status">Checking local training status…</div>
     <section id="messages" aria-live="polite" aria-label="Conversation"></section>
     <div class="composer">
-      <div id="tool-actions" role="group" aria-label="Local assistant tools">
-        <button type="button" data-command="/calc ">Calculate</button>
-        <button type="button" data-command="/search ">Search library</button>
-        <button type="button" data-command="/digest ">Digest sources</button>
-        <button type="button" data-command="/help">Help</button>
-      </div>
+      <section class="tool-tray" aria-label="Local quick actions">
+        <div class="tool-bar-heading">
+          <span>Quick actions</span>
+          <small>LOCAL TOOLS ONLY</small>
+        </div>
+        <p class="tool-safety-note">
+          No system commands or external account actions—only local calculation and
+          search; your original files stay untouched.
+        </p>
+        <div id="tool-actions" role="group" aria-label="Available local tools">
+          <button type="button" data-command="/calc ">Calculate</button>
+          <button type="button" data-command="/search ">Search my files</button>
+          <button type="button" data-command="/digest ">Summarize sources</button>
+          <button type="button" data-command="/help">Help</button>
+        </div>
+      </section>
       <form id="composer">
-        <textarea id="input" placeholder="Message Woa…" aria-label="Message" rows="1" required></textarea>
+        <textarea id="input" placeholder="Ask a question or try a local tool…" aria-label="Message Woa" rows="1" required></textarea>
         <button id="send" type="submit">Send</button>
       </form>
       <div id="composer-hint">Enter to send · Shift+Enter for a new line</div>
@@ -500,6 +570,7 @@
     const modelStatusEl = document.querySelector("#model-status");
     const trainingStatusEl = document.querySelector("#training-status");
     const inputEl = document.querySelector("#input");
+    const sendButtonEl = document.querySelector("#send");
     const knowledgeFilesEl = document.querySelector("#knowledge-files");
     const knowledgeStatusEl = document.querySelector("#knowledge-status");
     const settingsStatusEl = document.querySelector("#settings-status");
@@ -512,6 +583,8 @@
     let activeId = null;
     let knownMessageIds = null;
     let sending = false;
+    let lastConversationSync = 0;
+    let lastStatusSync = 0;
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -526,6 +599,9 @@
     function renderMessages(messages) {
       const signature = messages.map(message => message.id).join(",");
       if (signature === knownMessageIds) return;
+      const shouldFollowLatest =
+        knownMessageIds === null ||
+        messagesEl.scrollHeight - messagesEl.scrollTop - messagesEl.clientHeight < 80;
       knownMessageIds = signature;
       messagesEl.replaceChildren();
       if (!messages.length) {
@@ -580,7 +656,7 @@
         article.append(messageHead, content);
         messagesEl.append(article);
       }
-      messagesEl.scrollTop = messagesEl.scrollHeight;
+      if (shouldFollowLatest) messagesEl.scrollTop = messagesEl.scrollHeight;
     }
 
     function resizeComposer() {
@@ -598,7 +674,13 @@
     }
 
     function loadInterfaceSettings() {
-      const defaults = { effects: true, compact: false, largeText: false };
+      const prefersReducedMotion =
+        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+      const defaults = {
+        effects: !prefersReducedMotion,
+        compact: false,
+        largeText: false
+      };
       let saved;
       try {
         const stored = window.localStorage.getItem(interfaceSettingsKey);
@@ -689,13 +771,13 @@
       const accelerator = hardware.accelerator ? ` (${hardware.accelerator})` : "";
       if (!health.model_available) {
         modelStatusEl.textContent =
-          "General chat needs a local model. Set WOA_MODEL_PATH to a local instruction/chat model directory, or train the project model. Local tools still work.";
+          "General chat needs a local model. Your local tools are ready—try Calculate or Search below.";
       } else if (health.model_backend === "local_pretrained") {
         modelStatusEl.textContent =
-          `Local pretrained chat model on ${hardware.device}${accelerator}.`;
+          `Your local chat model is ready on ${hardware.device}${accelerator}.`;
       } else {
         modelStatusEl.textContent =
-          `Experimental project-owned model on ${hardware.device}${accelerator}. Local tools handle calculations, search, and source summaries.`;
+          `Your experimental local model is running on ${hardware.device}${accelerator}. Calculate, search, and source summaries are also available.`;
       }
     }
 
@@ -704,12 +786,12 @@
       const step = events.find(event => event.event_type === "training_step");
       if (step) {
         trainingStatusEl.textContent =
-          `Training telemetry: step ${step.payload.step}/${step.payload.total_steps}, ` +
+          `Training progress: step ${step.payload.step}/${step.payload.total_steps}, ` +
           `loss ${Number(step.payload.loss).toFixed(4)}, device ${step.payload.device}.`;
       } else if (events.length) {
-        trainingStatusEl.textContent = `Latest training event: ${events[0].event_type}.`;
+        trainingStatusEl.textContent = `Latest local training update: ${events[0].event_type}.`;
       } else {
-        trainingStatusEl.textContent = "No local training telemetry yet.";
+        trainingStatusEl.textContent = "No training runs recorded on this device yet.";
       }
     }
 
@@ -760,18 +842,25 @@
     });
 
     async function syncClients() {
+      const now = Date.now();
+      const updates = [refreshMessages()];
+      if (now - lastConversationSync >= 5000) {
+        lastConversationSync = now;
+        updates.push(refreshConversations());
+      }
+      if (now - lastStatusSync >= 15000) {
+        lastStatusSync = now;
+        updates.push(refreshModelStatus(), refreshTrainingStatus());
+      }
       try {
-        await Promise.all([
-          refreshMessages(),
-          refreshConversations(),
-          refreshModelStatus(),
-          refreshTrainingStatus()
-        ]);
+        const results = await Promise.allSettled(updates);
+        const failed = results.find(result => result.status === "rejected");
+        if (failed) throw failed.reason;
         if (!sending) statusEl.textContent = "";
       } catch (error) {
         if (!sending) statusEl.textContent = `Sync error: ${error.message}`;
       } finally {
-        window.setTimeout(syncClients, 1500);
+        window.setTimeout(syncClients, document.hidden ? 10000 : 1500);
       }
     }
 
@@ -784,9 +873,10 @@
       const content = inputEl.value.trim();
       if (!content || !activeId) return;
       sending = true;
-      statusEl.textContent = "Processing locally…";
+      statusEl.textContent = "Working on it locally…";
       document.querySelector(".composer").classList.add("is-processing");
-      document.querySelector("#send").disabled = true;
+      sendButtonEl.disabled = true;
+      sendButtonEl.textContent = "Working…";
       try {
         await api(`/api/conversations/${encodeURIComponent(activeId)}/messages`, {
           method: "POST",
@@ -806,7 +896,8 @@
       } finally {
         sending = false;
         document.querySelector(".composer").classList.remove("is-processing");
-        document.querySelector("#send").disabled = false;
+        sendButtonEl.disabled = false;
+        sendButtonEl.textContent = "Send";
         inputEl.focus();
       }
     });
@@ -815,6 +906,8 @@
       try {
         await refreshConversations();
         await Promise.all([refreshModelStatus(), refreshTrainingStatus()]);
+        lastConversationSync = Date.now();
+        lastStatusSync = lastConversationSync;
       } catch (error) {
         modelStatusEl.textContent = `Local service unavailable: ${error.message}`;
       } finally {

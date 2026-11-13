@@ -1,9 +1,11 @@
 import contextlib
 from concurrent.futures import ThreadPoolExecutor
+import gzip
 import io
 import importlib.util
 import json
 import os
+import re
 import socket
 import sys
 import tempfile
@@ -72,6 +74,22 @@ class StoreTests(unittest.TestCase):
                 [item["content"] for item in store.list_messages(conversation["id"])],
                 ["First question"],
             )
+
+    def test_list_messages_limit_returns_latest_messages_in_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "woa.db")
+            conversation = store.create_conversation()
+            for content in ("first", "second", "third"):
+                store.add_message(conversation["id"], "user", content)
+
+            messages = store.list_messages(conversation["id"], limit=2)
+
+            self.assertEqual(
+                [message["content"] for message in messages],
+                ["second", "third"],
+            )
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                store.list_messages(conversation["id"], limit=0)
 
     def test_training_events_are_shared_and_structured(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1438,6 +1456,18 @@ class ApiTests(unittest.TestCase):
                         b"General chat needs a local model.",
                         page,
                     )
+                    self.assertIn(b"LOCAL TOOLS ONLY", page)
+                    self.assertIn(b"No system commands", page)
+                    self.assertEqual(
+                        re.findall(rb'data-command="([^"]*)"', page),
+                        [b"/calc ", b"/search ", b"/digest ", b"/help"],
+                    )
+                compressed_request = urllib.request.Request(
+                    base_url, headers={"Accept-Encoding": "gzip"}
+                )
+                with urllib.request.urlopen(compressed_request) as response:
+                    self.assertEqual(response.headers["Content-Encoding"], "gzip")
+                    self.assertIn(b"<title>Woa</title>", gzip.decompress(response.read()))
                 with urllib.request.urlopen(base_url + "/api/health") as response:
                     health = json.load(response)
                 self.assertTrue(health["ok"])
