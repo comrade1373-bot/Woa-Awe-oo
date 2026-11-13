@@ -16,11 +16,9 @@ from .tokenizer import ByteTokenizer
 
 CHECKPOINT_FORMAT_VERSION = 1
 _CHAT_SYSTEM_PROMPT = (
-    "You are Woa, a helpful general-purpose local assistant. Handle ordinary "
-    "conversation, explanations, planning, writing, and questions directly. "
-    "Use a local tool only when it materially helps. Be clear, specific, "
-    "truthful, and constructive. Admit uncertainty, ask when needed, and help "
-    "users learn. Never invent facts."
+    "You are Woa, a helpful general assistant. Answer directly and truthfully. "
+    "For broad goals, give ordered tasks, dependencies, checkpoints, risks, "
+    "and success checks. Never claim unperformed work."
 )
 
 
@@ -122,12 +120,11 @@ def _build_inference_prompt(messages, context_length, tokenizer=None):
         else []
     )
     system_budget = min(180, budget * 2 // 3, budget - len(user_tokens))
-    system_contents = [
+    system_contents = [_CHAT_SYSTEM_PROMPT] + [
         message["content"]
         for message in messages
         if message.get("role") == "system"
     ]
-    system_contents.append(_CHAT_SYSTEM_PROMPT)
     if latest_user is not None:
         system_contents.append(
             prompt_guidance(communication_cues(latest_user["content"]))
@@ -659,10 +656,13 @@ class ModelRuntime:
             self._loaded_mtime = checkpoint_mtime
             self._context_length = context_length
 
-    def generate(self, messages, max_new_tokens=128):
+    def generate(self, messages, max_new_tokens=None):
         with self._generation_lock:
             self._load()
             import torch
+
+            if max_new_tokens is None:
+                max_new_tokens = 256 if self.backend == "local_pretrained" else 128
 
             if self.backend == "local_pretrained":
                 tokenizer = self._tokenizer

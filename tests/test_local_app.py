@@ -303,6 +303,12 @@ class ToolTests(unittest.TestCase):
             self.assertEqual(len(tool_runtime.calls), 1)
             self.assertEqual(tool_runtime.calls[0][-2]["role"], "system")
             self.assertIn("<tool>", tool_runtime.calls[0][-2]["content"])
+            self.assertIn("dependency order", tool_runtime.calls[0][-2]["content"])
+            self.assertIn("completion checks", tool_runtime.calls[0][-2]["content"])
+            self.assertIn(
+                "not private internal reasoning",
+                tool_runtime.calls[0][-2]["content"],
+            )
 
             class InvalidToolCallingRuntime:
                 def generate(self, _messages):
@@ -705,6 +711,19 @@ class FoundationTests(unittest.TestCase):
         self.assertIn("current request", decoded)
         self.assertNotIn("old question", decoded)
 
+    def test_inference_prompt_guides_planning_tasks_and_completion_checks(self):
+        from woa.training import _build_inference_prompt
+
+        prompt = _build_inference_prompt(
+            [{"role": "user", "content": "Plan a multi-step project."}],
+            context_length=512,
+        )
+
+        decoded = ByteTokenizer().decode(prompt)
+        self.assertIn("dependencies", decoded)
+        self.assertIn("checkpoints", decoded)
+        self.assertIn("success checks", decoded)
+
     def test_inference_prompt_truncates_long_unicode_user_input_safely(self):
         from woa.training import _build_inference_prompt
 
@@ -925,7 +944,7 @@ class TransformerTests(unittest.TestCase):
                 return "Hello! How can I help?"
 
         class FakeModel:
-            config = type("Config", (), {"max_position_embeddings": 256})()
+            config = type("Config", (), {"max_position_embeddings": 1024})()
             load_options = None
             generation_options = None
 
@@ -968,6 +987,7 @@ class TransformerTests(unittest.TestCase):
         self.assertEqual(FakeTokenizer.messages[-1]["content"], "Hello")
         self.assertTrue(FakeTokenizer().template_options["add_generation_prompt"])
         self.assertTrue(FakeModel().generation_options["do_sample"])
+        self.assertEqual(FakeModel.generation_options["max_new_tokens"], 256)
 
     def test_exact_million_parameter_architecture_uses_learned_positions(self):
         import torch
