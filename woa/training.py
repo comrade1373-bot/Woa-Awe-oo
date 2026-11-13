@@ -114,6 +114,8 @@ def train(
     on_step=None,
     resume_from=None,
     checkpoint_interval=100,
+    examples=None,
+    initialize_from=None,
 ):
     try:
         import torch
@@ -134,11 +136,20 @@ def train(
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(seed)
 
-    corpus = load_text_corpus(paths)
     tokenizer = ByteTokenizer()
-    token_ids = torch.tensor(tokenizer.encode(corpus), dtype=torch.long)
+    if examples is None:
+        corpus = load_text_corpus(paths)
+        token_ids = torch.tensor(tokenizer.encode(corpus), dtype=torch.long)
+        corpus_bytes = len(corpus.encode("utf-8"))
+    else:
+        if not examples:
+            raise ValueError("Supervised fine-tuning needs at least one example.")
+        corpus = None
+        token_ids = None
+        corpus_bytes = sum(len(example["input_ids"]) for example in examples)
     resume_checkpoint = None
     resume_optimizer = None
+    initial_checkpoint = None
     if resume_from is not None:
         try:
             resume_checkpoint = torch.load(
@@ -174,16 +185,63 @@ def train(
             )
         config = resumed_config
     else:
-        config = config or ModelConfig()
+        if initialize_from is not None:
+            try:
+                initial_checkpoint = torch.load(
+                    initialize_from, map_location="cpu", weights_only=True
+                )
+                if (
+                    initial_checkpoint.get("format_version")
+                    != CHECKPOINT_FORMAT_VERSION
+                    or initial_checkpoint.get("tokenizer") != "byte-v1"
+                ):
+                    raise ValueError("Unsupported base checkpoint format.")
+                base_config = ModelConfig(**initial_checkpoint["config"])
+            except (
+                OSError,
+                EOFError,
+                KeyError,
+                TypeError,
+                ValueError,
+                RuntimeError,
+                AttributeError,
+                pickle.UnpicklingError,
+            ) as error:
+                raise RuntimeError(
+                    f"Could not read base checkpoint {initialize_from}."
+                ) from error
+            if config is not None and config != base_config:
+                raise ValueError(
+                    "Base checkpoint architecture does not match the requested config."
+                )
+            config = base_config
+        else:
+            config = config or ModelConfig()
+    if resume_from is not None and initialize_from is not None:
+        raise ValueError("Choose either resume_from or initialize_from, not both.")
     if config.vocab_size != tokenizer.VOCAB_SIZE:
         raise ValueError(
             f"Model vocab_size must match the byte tokenizer ({tokenizer.VOCAB_SIZE})."
         )
-    if token_ids.numel() < config.context_length + 1:
-        raise ValueError(
-            f"Corpus needs at least {config.context_length + 1} tokens for this "
-            "context length."
-        )
+    if examples is None:
+        if token_ids.numel() < config.context_length + 1:
+            raise ValueError(
+                f"Corpus needs at least {config.context_length + 1} tokens for this "
+                "context length."
+            )
+    else:
+        for index, example in enumerate(examples, start=1):
+            input_ids = example.get("input_ids")
+            targets = example.get("targets")
+            if (
+                not isinstance(input_ids, list)
+                or not isinstance(targets, list)
+                or not input_ids
+                or len(input_ids) != len(targets)
+                or len(input_ids) > config.context_length
+                or not any(target != -100 for target in targets)
+            ):
+                raise ValueError(f"Invalid or overlong supervised example {index}.")
 
     profile = detect_hardware()
     device = torch.device(profile["device"])
@@ -197,6 +255,8 @@ def train(
         completed_steps = int(
             resume_checkpoint.get("training", {}).get("completed_steps", 0)
         )
+    elif initial_checkpoint is not None:
+        model.load_state_dict(initial_checkpoint["model"])
     torch.set_num_threads(min(8, max(1, profile["cpu_count"])))
     started = time.monotonic()
     use_amp = device.type == "cuda"
@@ -233,8 +293,9 @@ def train(
                 "steps": steps,
                 "completed_steps": completed_steps + completed,
                 "seed": seed,
-                "corpus_bytes": len(corpus.encode("utf-8")),
+                "corpus_bytes": corpus_bytes,
                 "device": str(device),
+                "stage": "sft" if examples is not None else "pretraining",
             },
         }
         _atomic_torch_save(
@@ -258,21 +319,34 @@ def train(
         previous_checkpoint_id = checkpoint_id
 
     for step in range(steps):
-        indices = torch.randint(
-            0, token_ids.numel() - config.context_length, (batch_size,)
-        )
-        inputs = torch.stack(
-            [
-                token_ids[index : index + config.context_length]
-                for index in indices.tolist()
-            ]
-        ).to(device)
-        targets = torch.stack(
-            [
-                token_ids[index + 1 : index + config.context_length + 1]
-                for index in indices.tolist()
-            ]
-        ).to(device)
+        if examples is None:
+            indices = torch.randint(
+                0, token_ids.numel() - config.context_length, (batch_size,)
+            )
+            inputs = torch.stack(
+                [
+                    token_ids[index : index + config.context_length]
+                    for index in indices.tolist()
+                ]
+            ).to(device)
+            targets = torch.stack(
+                [
+                    token_ids[index + 1 : index + config.context_length + 1]
+                    for index in indices.tolist()
+                ]
+            ).to(device)
+        else:
+            indices = torch.randint(0, len(examples), (batch_size,)).tolist()
+            batch_length = max(len(examples[index]["input_ids"]) for index in indices)
+            inputs = torch.zeros((batch_size, batch_length), dtype=torch.long)
+            targets = torch.full((batch_size, batch_length), -100, dtype=torch.long)
+            for row, index in enumerate(indices):
+                example = examples[index]
+                length = len(example["input_ids"])
+                inputs[row, :length] = torch.tensor(example["input_ids"])
+                targets[row, :length] = torch.tensor(example["targets"])
+            inputs = inputs.to(device)
+            targets = targets.to(device)
         current_lr = learning_rate(
             step,
             steps,
@@ -433,3 +507,72 @@ class ModelRuntime:
                     "The project-trained model returned an empty response."
                 )
             return reply
+
+
+def evaluate_checkpoint(checkpoint_path, paths):
+    try:
+        import torch
+        from torch.nn import functional as functional
+    except ImportError as error:
+        raise ModelDependencyError(
+            "PyTorch is required to evaluate a model. "
+            'Install it with `pip install -e ".[train]"`.'
+        ) from error
+    checkpoint_path = Path(checkpoint_path)
+    corpus = load_text_corpus(paths)
+    token_ids = torch.tensor(ByteTokenizer().encode(corpus), dtype=torch.long)
+    try:
+        checkpoint = torch.load(
+            checkpoint_path, map_location="cpu", weights_only=True
+        )
+        if (
+            checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION
+            or checkpoint.get("tokenizer") != "byte-v1"
+        ):
+            raise ValueError("Unsupported model checkpoint format.")
+        config = ModelConfig(**checkpoint["config"])
+        if config.vocab_size != ByteTokenizer.VOCAB_SIZE:
+            raise ValueError("Checkpoint vocabulary does not match byte-v1.")
+        model = build_model(config)
+        model.load_state_dict(checkpoint["model"])
+    except (
+        OSError,
+        EOFError,
+        KeyError,
+        TypeError,
+        ValueError,
+        RuntimeError,
+        AttributeError,
+        pickle.UnpicklingError,
+    ) as error:
+        raise RuntimeError(f"Could not load model checkpoint {checkpoint_path}.") from error
+
+    profile = detect_hardware()
+    device = torch.device(profile["device"])
+    model.to(device).eval()
+    token_ids = token_ids.to(device)
+    total_loss = 0.0
+    total_tokens = 0
+    with torch.no_grad():
+        for start in range(0, token_ids.numel() - 1, config.context_length):
+            inputs = token_ids[start : start + config.context_length]
+            targets = token_ids[start + 1 : start + config.context_length + 1]
+            if inputs.numel() != targets.numel():
+                inputs = inputs[:-1]
+            logits = model(inputs.unsqueeze(0))
+            loss_sum = functional.cross_entropy(
+                logits.reshape(-1, config.vocab_size),
+                targets,
+                reduction="sum",
+            )
+            total_loss += float(loss_sum.cpu())
+            total_tokens += targets.numel()
+    if not total_tokens:
+        raise ValueError("Evaluation corpus contains no target tokens.")
+    mean_loss = total_loss / total_tokens
+    return {
+        "tokens": total_tokens,
+        "mean_cross_entropy": mean_loss,
+        "perplexity": math.exp(min(mean_loss, 80)),
+        "device": str(device),
+    }

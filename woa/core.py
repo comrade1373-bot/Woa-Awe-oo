@@ -54,6 +54,22 @@ class Store:
                     event_type TEXT NOT NULL,
                     payload TEXT NOT NULL
                 );
+                CREATE TABLE IF NOT EXISTS knowledge_chunks (
+                    source TEXT NOT NULL,
+                    content_hash TEXT NOT NULL,
+                    chunk_index INTEGER NOT NULL,
+                    content TEXT NOT NULL,
+                    indexed_at TEXT NOT NULL,
+                    PRIMARY KEY (source, content_hash, chunk_index)
+                );
+                CREATE INDEX IF NOT EXISTS knowledge_chunks_by_source
+                    ON knowledge_chunks(source);
+                CREATE VIRTUAL TABLE IF NOT EXISTS knowledge_fts USING fts5(
+                    source UNINDEXED,
+                    chunk_index UNINDEXED,
+                    content,
+                    tokenize = 'unicode61'
+                );
                 """
             )
 

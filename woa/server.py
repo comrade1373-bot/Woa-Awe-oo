@@ -5,9 +5,12 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+from .agent import LocalAgent, ToolInvocationError
 from .core import Store, model_checkpoint_path
 from .hardware import detect_hardware
+from .knowledge import KnowledgeIndex
 from .training import ModelRuntime
+from .tools import build_tool_bus
 
 
 WEB_ROOT = Path(__file__).parent / "web"
@@ -18,6 +21,11 @@ def handler_for(store, runtime=None):
     runtime = runtime or ModelRuntime(
         model_checkpoint_path(store.path.parent / "model.pt")
     )
+    knowledge = KnowledgeIndex(store)
+    tool_bus = build_tool_bus(knowledge, runtime=runtime)
+    agent = LocalAgent(runtime, tool_bus)
+    conversation_locks = {}
+    conversation_locks_guard = threading.Lock()
 
     class RequestHandler(BaseHTTPRequestHandler):
         server_version = "WoaAweOo/0.2"
@@ -76,6 +84,13 @@ def handler_for(store, runtime=None):
                         "model_available": runtime.available,
                         "model_kind": "project_trained_transformer",
                         "hardware": detect_hardware(),
+                        "features": [
+                            "shared_conversations",
+                            "tool_bus",
+                            "knowledge_index",
+                            "serialized_turns",
+                            "mewtronic_environment",
+                        ],
                     },
                 )
                 return
@@ -83,6 +98,15 @@ def handler_for(store, runtime=None):
                 self.send_json(
                     200,
                     {"events": store.list_training_events()},
+                )
+                return
+            if path == "/api/tools":
+                self.send_json(200, {"tools": tool_bus.describe()})
+                return
+            if path == "/api/knowledge/documents":
+                self.send_json(
+                    200,
+                    {"documents": knowledge.list_documents()},
                 )
                 return
             if path == "/api/conversations":
@@ -139,6 +163,35 @@ def handler_for(store, runtime=None):
                     return
                 self.send_json(201, {"conversation": store.create_conversation(title)})
                 return
+            if path == "/api/knowledge/documents":
+                name = payload.get("name")
+                content = payload.get("content")
+                if not isinstance(name, str) or not name.strip():
+                    self.send_json(400, {"error": "A document filename is required."})
+                    return
+                safe_name = name.strip().replace("\\", "/").rsplit("/", 1)[-1]
+                if not safe_name or len(safe_name) > 255:
+                    self.send_json(400, {"error": "Invalid document filename."})
+                    return
+                try:
+                    result = knowledge.ingest_text(f"upload/{safe_name}", content)
+                except ValueError as error:
+                    self.send_json(400, {"error": str(error)})
+                    return
+                self.send_json(201, {"document": result})
+                return
+            if path.startswith("/api/tools/"):
+                tool_name = unquote(path[len("/api/tools/") :].strip("/"))
+                if not tool_name or "/" in tool_name:
+                    self.send_json(404, {"error": "Tool not found."})
+                    return
+                try:
+                    result = tool_bus.invoke(tool_name, payload.get("arguments"))
+                except ValueError as error:
+                    self.send_json(400, {"error": str(error)})
+                    return
+                self.send_json(200, {"result": result})
+                return
             prefix = "/api/conversations/"
             suffix = "/messages"
             if path.startswith(prefix) and path.endswith(suffix):
@@ -150,21 +203,33 @@ def handler_for(store, runtime=None):
                 if not isinstance(content, str) or not content.strip():
                     self.send_json(400, {"error": "Message content is required."})
                     return
-                user_message = store.add_message(
-                    conversation_id, "user", content.strip()
-                )
+                user_message = None
                 try:
-                    history = store.list_messages(conversation_id)[-40:]
-                    reply = runtime.generate(history)
-                except (RuntimeError, ValueError) as error:
-                    self.send_json(
-                        503,
-                        {"error": str(error), "message": user_message},
-                    )
+                    with conversation_locks_guard:
+                        conversation_lock = conversation_locks.setdefault(
+                            conversation_id, threading.Lock()
+                        )
+                    with conversation_lock:
+                        user_message = store.add_message(
+                            conversation_id, "user", content.strip()
+                        )
+                        history = store.list_messages(conversation_id)[-40:]
+                        reply = agent.reply(history)
+                        assistant_message = store.add_message(
+                            conversation_id, "assistant", reply
+                        )
+                except ToolInvocationError as error:
+                    payload = {"error": str(error)}
+                    if user_message is not None:
+                        payload["message"] = user_message
+                    self.send_json(400, payload)
                     return
-                assistant_message = store.add_message(
-                    conversation_id, "assistant", reply
-                )
+                except (RuntimeError, ValueError) as error:
+                    payload = {"error": str(error)}
+                    if user_message is not None:
+                        payload["message"] = user_message
+                    self.send_json(503, payload)
+                    return
                 self.send_json(
                     201,
                     {"messages": [user_message, assistant_message]},

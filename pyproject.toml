@@ -19,4 +19,4 @@ woa = "woa.cli:main"
 include = ["woa*"]
 
 [tool.setuptools.package-data]
-woa = ["web/*.html"]
+woa = ["web/*.html", "data/knowledge/*.txt"]

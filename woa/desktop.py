@@ -66,7 +66,7 @@ class DesktopClient:
                 f" ({hardware['accelerator']})" if hardware["accelerator"] else ""
             )
             text = (
-                f"Project-trained model ready on {hardware['device']}{accelerator}"
+                f"Experimental project model on {hardware['device']}{accelerator}"
                 if health["model_available"]
                 else f"No trained model yet; compute device: {hardware['device']}{accelerator}"
             )
@@ -148,12 +148,17 @@ class DesktopClient:
         self.select_conversation(result["conversation"]["id"])
 
     def refresh_messages(self):
+        conversation_id = self.active_id
+        if not conversation_id:
+            return
         try:
             result = request_json(
-                f"/api/conversations/{self.active_id}/messages"
+                f"/api/conversations/{conversation_id}/messages"
             )
         except RuntimeError as error:
             self.status.config(text=str(error))
+            return
+        if conversation_id != self.active_id:
             return
         messages = result["messages"]
         signature = ",".join(item["id"] for item in messages)
@@ -178,7 +183,7 @@ class DesktopClient:
             return
         self.input.delete("1.0", "end")
         self.send_button.config(state="disabled")
-        self.status.config(text="Waiting for the local model…")
+        self.status.config(text="Processing locally…")
         conversation_id = self.active_id
 
         def send():

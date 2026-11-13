@@ -1,6 +1,11 @@
+import contextlib
+from concurrent.futures import ThreadPoolExecutor
+import io
 import importlib.util
 import json
+import os
 import socket
+import sys
 import tempfile
 import threading
 import unittest
@@ -10,13 +15,43 @@ from email.message import Message
 from pathlib import Path
 from unittest.mock import MagicMock, Mock, patch
 
+from woa.agent import LocalAgent, ToolInvocationError
+from woa.bundled_knowledge import BUNDLED_SOURCES, seed_bundled_knowledge
+from woa.client import request_json
+from woa.cli import (
+    launch_application,
+    main as cli_main,
+    run_diagnostics,
+)
 from woa.core import Store
+from woa.corpus import _nasa_abstract_text, _world_bank_text, download_starter_corpus
+from woa.datasets import (
+    build_preference_examples,
+    build_sft_examples,
+    load_chat_records,
+    load_preference_records,
+)
 from woa.hardware import recommended_batch_size, recommended_model_settings
+from woa.knowledge import KnowledgeIndex
 from woa.model import ModelConfig
 from woa.server import create_server
 from woa.sources import fetch_public_text, validate_source_url
 from woa.tokenizer import ByteTokenizer
-from woa.training import ModelRuntime, learning_rate, load_text_corpus, train
+from woa.training import (
+    ModelRuntime,
+    evaluate_checkpoint,
+    learning_rate,
+    load_text_corpus,
+    train,
+)
+from woa.alignment import train_dpo
+from woa.tools import (
+    ToolBus,
+    build_tool_bus,
+    calculate,
+    information_entropy,
+    solve_polynomial,
+)
 
 
 class StoreTests(unittest.TestCase):
@@ -47,7 +82,478 @@ class StoreTests(unittest.TestCase):
             self.assertEqual(events[0]["payload"], {"loss": 1.25, "step": 4})
 
 
+class KnowledgeTests(unittest.TestCase):
+    def test_ingest_search_and_replace_preserve_citations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = KnowledgeIndex(Store(Path(directory) / "woa.db"))
+            index.ingest_text(
+                "notes.md",
+                "Aerospace logistics depend on reliable supply chains.",
+            )
+
+            results = index.search("aerospace supply")
+
+            self.assertEqual(results[0]["source"], "notes.md")
+            self.assertEqual(results[0]["chunk"], 1)
+            self.assertIn("reliable supply chains", results[0]["content"])
+            index.ingest_text("notes.md", "Marine biology studies ocean life.")
+            self.assertEqual(index.search("aerospace"), [])
+            self.assertEqual(len(index.list_documents()), 1)
+
+    def test_digest_paths_reject_unsupported_and_invalid_utf8_files(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            supported = root / "guide.md"
+            supported.write_text("A local document.", encoding="utf-8")
+            index = KnowledgeIndex(Store(root / "woa.db"))
+            self.assertEqual(len(index.ingest_paths([supported])), 1)
+
+            unsupported = root / "image.png"
+            unsupported.write_bytes(b"\x89PNG")
+            with self.assertRaisesRegex(ValueError, "Unsupported file type"):
+                index.ingest_paths([unsupported])
+
+            invalid_text = root / "invalid.txt"
+            invalid_text.write_bytes(b"\xff")
+            with self.assertRaisesRegex(ValueError, "valid UTF-8"):
+                index.ingest_paths([invalid_text])
+
+    def test_bundled_knowledge_is_searchable_and_seed_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = KnowledgeIndex(Store(Path(directory) / "woa.db"))
+
+            first = seed_bundled_knowledge(index)
+            second = seed_bundled_knowledge(index)
+
+            self.assertEqual(len(first), len(BUNDLED_SOURCES))
+            self.assertEqual(second, [])
+            self.assertTrue(
+                any(
+                    hit["source"] == "bundled/plato-republic-gutenberg-1497.txt"
+                    for hit in index.search("Socrates justice")
+                )
+            )
+            self.assertTrue(
+                any(
+                    hit["source"] == "bundled/nasa-forensics-public-abstracts.txt"
+                    for hit in index.search("forensic science evidence")
+                )
+            )
+
+
+class ToolTests(unittest.TestCase):
+    def test_calculator_supports_arithmetic_and_rejects_code(self):
+        self.assertEqual(calculate("2 + 3 * 4"), 14)
+        self.assertEqual(calculate("-(8 / 2)"), -4.0)
+        for expression in (
+            "__import__('os').system('whoami')",
+            "1 / 0",
+            "2 ** 13",
+        ):
+            with self.subTest(expression=expression):
+                with self.assertRaises(ValueError):
+                    calculate(expression)
+
+    def test_quadratic_solver_handles_linear_complex_and_invalid_inputs(self):
+        self.assertEqual(
+            solve_polynomial("x**2 - 5*x + 6 = 0")["roots"],
+            [2.0, 3.0],
+        )
+        self.assertEqual(solve_polynomial("2*x + 4 = 0")["roots"], [-2.0])
+        self.assertEqual(
+            solve_polynomial("x**2 + 1 = 0")["roots"],
+            [
+                {"real": 0.0, "imaginary": -1.0},
+                {"real": 0.0, "imaginary": 1.0},
+            ],
+        )
+        self.assertEqual(solve_polynomial("x = x")["roots"], "all real numbers")
+        self.assertEqual(solve_polynomial("x = x + 1")["roots"], [])
+        for equation in (
+            "x**3 + 1 = 0",
+            "1/x = 2",
+            "__import__('os')",
+            "x = x = 1",
+        ):
+            with self.subTest(equation=equation):
+                with self.assertRaises(ValueError):
+                    solve_polynomial(equation)
+
+    def test_shannon_entropy_is_local_and_bounded(self):
+        metrics = information_entropy("a b")
+
+        self.assertAlmostEqual(
+            metrics["character_entropy_bits_per_symbol"], 1.584962500721156
+        )
+        self.assertEqual(metrics["token_entropy_bits_per_token"], 1.0)
+        self.assertIn("not a measure of truth", metrics["note"])
+        with self.assertRaisesRegex(ValueError, "non-empty"):
+            information_entropy("  ")
+
+    def test_tool_bus_validates_arguments_and_agent_routes_tools(self):
+        with tempfile.TemporaryDirectory() as directory:
+            index = KnowledgeIndex(Store(Path(directory) / "woa.db"))
+            index.ingest_text("facts.txt", "Saturn has prominent rings.")
+            bus = build_tool_bus(index)
+
+            self.assertEqual(
+                bus.invoke("calculator", {"expression": "6 * 7"})["result"],
+                42,
+            )
+            self.assertEqual(
+                bus.invoke(
+                    "algebraic_solve",
+                    {"equation": "x**2 - 5*x + 6 = 0"},
+                )["roots"],
+                [2.0, 3.0],
+            )
+            self.assertEqual(
+                bus.invoke("information_entropy", {"text": "a b"})[
+                    "token_entropy_bits_per_token"
+                ],
+                1.0,
+            )
+            with self.assertRaisesRegex(ValueError, "Missing tool arguments"):
+                bus.invoke("calculator", {})
+            with self.assertRaisesRegex(ValueError, "Unknown tool"):
+                bus.invoke("unknown", {})
+
+            class FakeRuntime:
+                calls = 0
+
+                def generate(self, _messages):
+                    self.calls += 1
+                    return "model response"
+
+            runtime = FakeRuntime()
+            agent = LocalAgent(runtime, bus)
+            self.assertEqual(
+                agent.reply([{"role": "user", "content": "/calc 6 * 7"}]),
+                "42",
+            )
+            self.assertEqual(
+                agent.reply([{"role": "user", "content": "/calc 2 plus 2"}]),
+                "4",
+            )
+            self.assertEqual(
+                agent.reply(
+                    [{"role": "user", "content": "Please calculate 12 divided by 3 plus 1."}]
+                ),
+                "5.0",
+            )
+            self.assertEqual(
+                agent.reply([{"role": "user", "content": "What is 2 plus 2?"}]),
+                "4",
+            )
+            self.assertIn(
+                '"result": 42',
+                agent.reply(
+                    [
+                        {
+                            "role": "user",
+                            "content": '/tool calculator {"expression":"6 * 7"}',
+                        }
+                    ]
+                ),
+            )
+            self.assertIn(
+                "[facts.txt - chunk 1]",
+                agent.reply([{"role": "user", "content": "/search Saturn rings"}]),
+            )
+            self.assertIn(
+                "[facts.txt - chunk 1]",
+                agent.reply(
+                    [
+                        {
+                            "role": "user",
+                            "content": "Search my local notes for Saturn",
+                        }
+                    ]
+                ),
+            )
+            self.assertIn(
+                "[facts.txt - chunk 1]",
+                agent.reply(
+                    [
+                        {
+                            "role": "user",
+                            "content": "What do my files say about Saturn?",
+                        }
+                    ]
+                ),
+            )
+            self.assertIn(
+                "Saturn has prominent rings.",
+                agent.reply([{"role": "user", "content": "/digest Saturn rings"}]),
+            )
+            self.assertIn(
+                "Saturn has prominent rings.",
+                agent.reply(
+                    [
+                        {
+                            "role": "user",
+                            "content": "Summarize my documents about Saturn",
+                        }
+                    ]
+                ),
+            )
+            self.assertEqual(
+                agent.reply(
+                    [{"role": "user", "content": "Solve x**2 - 5*x + 6 = 0"}]
+                ),
+                "Roots of x**2 - 5*x + 6 = 0: x = 2.0, x = 3.0",
+            )
+            self.assertIn(
+                "1.0000 bits per token",
+                agent.reply(
+                    [{"role": "user", "content": "Shannon entropy of a b"}]
+                ),
+            )
+            self.assertIn(
+                "x = -2.0",
+                agent.reply(
+                    [{"role": "user", "content": "/solve 2*x + 4 = 0"}]
+                ),
+            )
+            self.assertIn(
+                "1.0000 bits per token",
+                agent.reply([{"role": "user", "content": "/entropy a b"}]),
+            )
+            self.assertIn(
+                "calculator",
+                agent.reply([{"role": "user", "content": "What tools do you have?"}]),
+            )
+            self.assertIn(
+                "offline",
+                agent.reply(
+                    [{"role": "user", "content": "Search the web for Saturn"}]
+                ),
+            )
+            about = agent.reply(
+                [{"role": "user", "content": "What is Mewtronic?"}]
+            )
+            self.assertIn("not conscious", about.lower())
+            self.assertIn("Mewtronic", about)
+            self.assertIn("facts.txt", about)
+            self.assertEqual(
+                agent.reply([{"role": "user", "content": "Hello"}]),
+                "model response",
+            )
+            self.assertEqual(runtime.calls, 1)
+            with self.assertRaises(ToolInvocationError):
+                agent.reply([{"role": "user", "content": "/calc 1 / 0"}])
+
+
+class CliKnowledgeTests(unittest.TestCase):
+    def test_start_seeds_bundled_sources_before_launching_client(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"WOA_DATA_DIR": directory}):
+                with patch.object(sys, "argv", ["woa", "start"]):
+                    with patch("woa.cli.seed_bundled_knowledge") as seed:
+                        with patch(
+                            "woa.cli.launch_application", return_value=0
+                        ) as launch:
+                            self.assertEqual(cli_main(), 0)
+
+            self.assertIsInstance(seed.call_args.args[0], KnowledgeIndex)
+            launch.assert_called_once()
+
+    def test_digest_and_search_cli_share_the_local_index(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            data_dir = root / "app-data"
+            document = root / "reference.md"
+            document.write_text(
+                "Local agents can use cited knowledge snippets.",
+                encoding="utf-8",
+            )
+            with patch.dict(os.environ, {"WOA_DATA_DIR": str(data_dir)}):
+                with patch.object(sys, "argv", ["woa", "digest", str(document)]):
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(cli_main(), 0)
+                    self.assertIn("Indexed 1 documents", output.getvalue())
+
+                with patch.object(
+                    sys, "argv", ["woa", "search", "cited", "knowledge"]
+                ):
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(cli_main(), 0)
+                    self.assertIn(str(document), output.getvalue())
+                    self.assertIn("cited knowledge snippets", output.getvalue())
+
+
+class LaunchTests(unittest.TestCase):
+    def test_client_reports_slow_local_service_without_raw_timeout_traceback(self):
+        with patch(
+            "woa.client.urllib.request.urlopen", side_effect=TimeoutError
+        ) as urlopen:
+            with self.assertRaisesRegex(RuntimeError, "timed out after 15 seconds"):
+                request_json("/api/health")
+        self.assertEqual(urlopen.call_args.kwargs["timeout"], 15)
+
+    def test_start_creates_service_and_opens_web_client(self):
+        server = Mock()
+        with patch.dict(os.environ, {"WOA_PORT": "8765"}):
+            with patch(
+                "woa.cli.request_json",
+                side_effect=RuntimeError("Cannot connect to http://127.0.0.1:8765."),
+            ):
+                with patch("woa.cli.create_server", return_value=server) as create:
+                    with patch("woa.cli.start_server_in_thread") as start:
+                        with patch("woa.cli.webbrowser.open", return_value=True) as open_web:
+                            with patch(
+                                "woa.cli.time.sleep", side_effect=KeyboardInterrupt
+                            ):
+                                with contextlib.redirect_stdout(io.StringIO()):
+                                    result = launch_application(
+                                        "web", "127.0.0.1", 8765
+                                    )
+
+        self.assertEqual(result, 0)
+        create.assert_called_once_with(host="127.0.0.1", port=8765)
+        start.assert_called_once_with(server)
+        open_web.assert_called_once_with("http://127.0.0.1:8765")
+        server.shutdown.assert_called_once()
+        server.server_close.assert_called_once()
+
+    def test_start_reuses_existing_service_and_doctor_reports_integrations(self):
+        health = {
+            "ok": True,
+            "model_kind": "project_trained_transformer",
+            "model_available": True,
+            "hardware": {"device": "cpu"},
+            "features": [
+                "shared_conversations",
+                "tool_bus",
+                "knowledge_index",
+                "serialized_turns",
+                "mewtronic_environment",
+            ],
+        }
+
+        def request(path):
+            if path == "/api/health":
+                return health
+            if path == "/api/tools":
+                return {"tools": [{"name": "calculator"}, {"name": "knowledge_search"}]}
+            if path == "/api/knowledge/documents":
+                return {"documents": [{"source": "notes.md"}]}
+            raise AssertionError(f"Unexpected endpoint: {path}")
+
+        with patch.dict(os.environ, {"WOA_PORT": "8765"}):
+            with patch("woa.cli.request_json", side_effect=request):
+                with patch("woa.cli.create_server") as create:
+                    with patch("woa.cli.webbrowser.open", return_value=True):
+                        with contextlib.redirect_stdout(io.StringIO()):
+                            self.assertEqual(
+                                launch_application("web", "127.0.0.1", 8765),
+                                0,
+                            )
+                        create.assert_not_called()
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        self.assertEqual(run_diagnostics(), 0)
+                    self.assertIn("calculator, knowledge_search", output.getvalue())
+                    self.assertIn("Indexed knowledge documents: 1", output.getvalue())
+
+
 class FoundationTests(unittest.TestCase):
+    def test_world_bank_records_are_rendered_as_attributed_text(self):
+        response = json.dumps(
+            [
+                {"lastupdated": "2026-01-01"},
+                [
+                    {
+                        "country": {"value": "Exampleland"},
+                        "countryiso3code": "EXM",
+                        "date": "2025",
+                        "value": 42.5,
+                    },
+                    {"country": {"value": "No data"}, "value": None},
+                ],
+            ]
+        )
+        with patch(
+            "woa.corpus.fetch_public_text",
+            return_value=(response, {"host": "api.worldbank.org"}),
+        ):
+            text, _metadata = _world_bank_text("NE.TRD.GNFS.ZS", "Trade (% of GDP)")
+
+        self.assertIn("Exampleland (EXM), 2025", text)
+        self.assertNotIn("No data", text)
+        self.assertIn("World Bank Indicators API", text)
+
+    def test_nasa_abstract_import_filters_non_public_records(self):
+        response = json.dumps(
+            {
+                "results": [
+                    {
+                        "id": 123,
+                        "title": "Public report",
+                        "abstract": "Public abstract.",
+                        "distribution": "PUBLIC",
+                        "copyright": {
+                            "determinationType": "GOV_PUBLIC_USE_PERMITTED",
+                            "containsThirdPartyMaterial": False,
+                        },
+                    },
+                    {
+                        "id": 456,
+                        "title": "Restricted report",
+                        "abstract": "Do not include.",
+                        "distribution": "LIMITED",
+                        "copyright": {
+                            "determinationType": "GOV_PUBLIC_USE_PERMITTED",
+                            "containsThirdPartyMaterial": False,
+                        },
+                    },
+                ]
+            }
+        )
+        with patch(
+            "woa.corpus.fetch_public_text",
+            return_value=(response, {"host": "ntrs.nasa.gov"}),
+        ):
+            text, metadata = _nasa_abstract_text("aerospace")
+
+        self.assertIn("Public abstract.", text)
+        self.assertNotIn("Do not include.", text)
+        self.assertEqual(metadata["included_records"], 1)
+
+    def test_curated_corpus_download_writes_rights_and_hash_manifest(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "woa.corpus.fetch_public_text",
+                return_value=("A public-domain text.", {"host": "www.gutenberg.org"}),
+            ):
+                records = download_starter_corpus(
+                    directory,
+                    categories=["scripture"],
+                )
+            target = Path(directory) / "bible-kjv-gutenberg-10.txt"
+            manifest = json.loads(
+                (Path(directory) / "sources.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(records), 1)
+            self.assertTrue(target.is_file())
+            self.assertIn("Project Gutenberg", manifest["sources"][0]["rights"])
+
+    def test_curated_philosophy_corpus_records_historical_scope(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch(
+                "woa.corpus.fetch_public_text",
+                return_value=("A public-domain philosophical text.", {"host": "www.gutenberg.org"}),
+            ) as fetch:
+                records = download_starter_corpus(
+                    directory,
+                    categories=["philosophy"],
+                )
+
+            self.assertEqual(len(records), 1)
+            self.assertEqual(records[0]["category"], "philosophy")
+            self.assertIn("historical", records[0]["scope_note"])
+            self.assertEqual(fetch.call_args.args[1], ["www.gutenberg.org"])
+            self.assertTrue(Path(records[0]["path"]).is_file())
+
     def test_byte_tokenizer_round_trips_utf8_and_roles(self):
         tokenizer = ByteTokenizer()
         text = "Hello, 世界 🌍"
@@ -105,6 +611,55 @@ class FoundationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "UTF-8"):
                 load_text_corpus([corpus])
+
+    def test_sft_dataset_masks_prompt_and_trains_assistant_answer(self):
+        tokenizer = ByteTokenizer()
+        examples = build_sft_examples(
+            [
+                [
+                    {"role": "user", "content": "Question"},
+                    {"role": "assistant", "content": "Answer"},
+                ]
+            ],
+            context_length=64,
+            tokenizer=tokenizer,
+        )
+
+        example = examples[0]
+        self.assertTrue(all(target == -100 for target in example["targets"][:-7]))
+        self.assertEqual(
+            example["targets"][-7:],
+            [*b"Answer", tokenizer.EOS],
+        )
+
+    def test_chat_jsonl_loader_rejects_malformed_records(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "data.jsonl"
+            data.write_text('{"messages": []}\n', encoding="utf-8")
+
+            with self.assertRaisesRegex(ValueError, "messages array"):
+                load_chat_records([data])
+
+    def test_preference_jsonl_builds_response_only_masks(self):
+        with tempfile.TemporaryDirectory() as directory:
+            data = Path(directory) / "preferences.jsonl"
+            data.write_text(
+                json.dumps(
+                    {
+                        "prompt": [{"role": "user", "content": "Question"}],
+                        "chosen": "Helpful",
+                        "rejected": "Unhelpful",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            records = load_preference_records([data])
+            examples = build_preference_examples(records, context_length=64)
+
+            self.assertEqual(len(examples), 1)
+            self.assertTrue(any(examples[0]["chosen"]["response_mask"]))
+            self.assertTrue(any(examples[0]["rejected"]["response_mask"]))
 
     def test_remote_dataset_url_requires_exact_allowlist_and_public_dns(self):
         public_result = [
@@ -231,9 +786,177 @@ class TransformerTests(unittest.TestCase):
                 ).is_file()
             )
 
+    def test_sft_finetunes_base_checkpoint_and_generates(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus.txt"
+            corpus.write_text(
+                "A tiny corpus for validating a model trained from scratch. " * 8,
+                encoding="utf-8",
+            )
+            config = ModelConfig(
+                context_length=32, d_model=16, n_heads=2, n_layers=1
+            )
+            base = Path(directory) / "base.pt"
+            fine_tuned = Path(directory) / "sft.pt"
+            train(
+                [corpus],
+                base,
+                steps=1,
+                batch_size=1,
+                warmup_steps=1,
+                config=config,
+            )
+            metrics = evaluate_checkpoint(base, [corpus])
+            self.assertEqual(metrics["tokens"], len(corpus.read_bytes()) + 1)
+            self.assertGreater(metrics["perplexity"], 0)
+            examples = build_sft_examples(
+                [
+                    [
+                        {"role": "user", "content": "What is 2 + 2?"},
+                        {"role": "assistant", "content": "4"},
+                    ]
+                ],
+                config.context_length,
+            )
+            train(
+                [],
+                fine_tuned,
+                steps=1,
+                batch_size=1,
+                warmup_steps=1,
+                config=config,
+                examples=examples,
+                initialize_from=base,
+            )
+
+            runtime = ModelRuntime(fine_tuned)
+            self.assertTrue(runtime.generate([], max_new_tokens=2))
+
+    def test_dpo_trains_from_a_frozen_reference_checkpoint(self):
+        with tempfile.TemporaryDirectory() as directory:
+            corpus = Path(directory) / "corpus.txt"
+            corpus.write_text(
+                "A tiny corpus for validating a model trained from scratch. " * 8,
+                encoding="utf-8",
+            )
+            config = ModelConfig(
+                context_length=32, d_model=16, n_heads=2, n_layers=1
+            )
+            reference = Path(directory) / "reference.pt"
+            aligned = Path(directory) / "aligned.pt"
+            train(
+                [corpus],
+                reference,
+                steps=1,
+                batch_size=1,
+                warmup_steps=1,
+                config=config,
+            )
+            records = [
+                {
+                    "prompt": [{"role": "user", "content": "What is 2 + 2?"}],
+                    "chosen": "4",
+                    "rejected": "5",
+                }
+            ]
+            examples = build_preference_examples(records, config.context_length)
+            train_dpo(
+                examples,
+                reference,
+                aligned,
+                steps=1,
+                batch_size=1,
+                checkpoint_interval=1,
+            )
+            train_dpo(
+                examples,
+                reference,
+                aligned,
+                steps=1,
+                batch_size=1,
+                checkpoint_interval=1,
+                resume_from=aligned,
+            )
+
+            self.assertTrue(ModelRuntime(aligned).generate([], max_new_tokens=2))
+
 
 class ApiTests(unittest.TestCase):
-    def test_chat_api_saves_project_runtime_reply(self):
+    def test_chat_api_serializes_concurrent_turns_per_conversation(self):
+        first_started = threading.Event()
+        second_user_saved = threading.Event()
+        release_first = threading.Event()
+
+        class FakeRuntime:
+            available = True
+
+            def generate(self, messages):
+                content = messages[-1]["content"]
+                if content == "first":
+                    first_started.set()
+                    if not release_first.wait(5):
+                        raise RuntimeError("Timed out waiting to finish the first turn.")
+                return f"reply: {content}"
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "woa.db")
+            add_message = store.add_message
+
+            def observe_second_user(conversation_id, role, content):
+                if role == "user" and content == "second":
+                    second_user_saved.set()
+                return add_message(conversation_id, role, content)
+
+            store.add_message = observe_second_user
+            server = create_server(
+                host="127.0.0.1",
+                port=0,
+                store=store,
+                runtime=FakeRuntime(),
+            )
+            server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+            server_thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+            conversation = store.create_conversation("Concurrent turns")
+
+            def send(content):
+                request = urllib.request.Request(
+                    f"{base_url}/api/conversations/{conversation['id']}/messages",
+                    data=json.dumps({"content": content}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    return json.load(response)
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as executor:
+                    first = executor.submit(send, "first")
+                    self.assertTrue(first_started.wait(2))
+                    second = executor.submit(send, "second")
+                    try:
+                        self.assertFalse(second_user_saved.wait(0.2))
+                    finally:
+                        release_first.set()
+                    first.result(timeout=5)
+                    second.result(timeout=5)
+                messages = store.list_messages(conversation["id"])
+                self.assertEqual(
+                    [message["content"] for message in messages],
+                    ["first", "reply: first", "second", "reply: second"],
+                )
+                with urllib.request.urlopen(
+                    f"{base_url}/api/conversations/{conversation['id']}/messages"
+                ) as response:
+                    synced_messages = json.load(response)["messages"]
+                self.assertEqual(synced_messages, messages)
+            finally:
+                release_first.set()
+                server.shutdown()
+                server.server_close()
+                server_thread.join(timeout=2)
+
+    def test_local_knowledge_and_tools_work_through_chat_api(self):
         class FakeRuntime:
             available = True
 
@@ -246,6 +969,114 @@ class ApiTests(unittest.TestCase):
                 port=0,
                 store=Store(Path(directory) / "woa.db"),
                 runtime=FakeRuntime(),
+            )
+            thread = threading.Thread(target=server.serve_forever, daemon=True)
+            thread.start()
+            base_url = f"http://127.0.0.1:{server.server_port}"
+
+            def post(path, payload):
+                request = urllib.request.Request(
+                    base_url + path,
+                    data=json.dumps(payload).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    return json.load(response)
+
+            try:
+                with urllib.request.urlopen(base_url + "/api/tools") as response:
+                    tools = json.load(response)["tools"]
+                self.assertEqual(
+                    {tool["name"] for tool in tools},
+                    {
+                        "calculator",
+                        "algebraic_solve",
+                        "information_entropy",
+                        "knowledge_search",
+                        "knowledge_digest",
+                        "local_environment",
+                    },
+                )
+
+                uploaded = post(
+                    "/api/knowledge/documents",
+                    {
+                        "name": "facts.md",
+                        "content": "The local library documents orbital mechanics.",
+                    },
+                )
+                self.assertEqual(uploaded["document"]["chunks"], 1)
+                search = post(
+                    "/api/tools/knowledge_search",
+                    {"arguments": {"query": "orbital mechanics"}},
+                )
+                self.assertEqual(
+                    search["result"]["results"][0]["source"],
+                    "upload/facts.md",
+                )
+
+                conversation = post(
+                    "/api/conversations", {"title": "Tools"}
+                )["conversation"]
+                result = post(
+                    f"/api/conversations/{conversation['id']}/messages",
+                    {"content": "/calc 6 * 7"},
+                )
+                self.assertEqual(result["messages"][1]["content"], "42")
+                result = post(
+                    f"/api/conversations/{conversation['id']}/messages",
+                    {"content": "Please calculate 6 times 7."},
+                )
+                self.assertEqual(result["messages"][1]["content"], "42")
+                result = post(
+                    f"/api/conversations/{conversation['id']}/messages",
+                    {"content": "Search my files for orbital mechanics"},
+                )
+                self.assertIn(
+                    "[upload/facts.md - chunk 1]",
+                    result["messages"][1]["content"],
+                )
+                result = post(
+                    f"/api/conversations/{conversation['id']}/messages",
+                    {"content": "Summarize my documents about orbital mechanics"},
+                )
+                self.assertIn(
+                    "orbital mechanics",
+                    result["messages"][1]["content"],
+                )
+
+                invalid_tool_request = urllib.request.Request(
+                    f"{base_url}/api/conversations/{conversation['id']}/messages",
+                    data=json.dumps({"content": "/calc 1 / 0"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with self.assertRaises(urllib.error.HTTPError) as error:
+                    urllib.request.urlopen(invalid_tool_request)
+                self.assertEqual(error.exception.code, 400)
+                error.exception.close()
+            finally:
+                server.shutdown()
+                server.server_close()
+                thread.join(timeout=2)
+
+    def test_chat_api_saves_project_runtime_reply(self):
+        class FakeRuntime:
+            available = True
+            calls = 0
+
+            def generate(self, _messages):
+                self.calls += 1
+                return "A locally generated answer."
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = FakeRuntime()
+            server = create_server(
+                host="127.0.0.1",
+                port=0,
+                store=Store(Path(directory) / "woa.db"),
+                runtime=runtime,
             )
             thread = threading.Thread(target=server.serve_forever, daemon=True)
             thread.start()
@@ -269,6 +1100,16 @@ class ApiTests(unittest.TestCase):
                     messages = json.load(response)["messages"]
                 self.assertEqual([item["role"] for item in messages], ["user", "assistant"])
                 self.assertEqual(messages[1]["content"], "A locally generated answer.")
+                request = urllib.request.Request(
+                    f"{base_url}/api/conversations/{conversation_id}/messages",
+                    data=json.dumps({"content": "What is Mewtronic?"}).encode(),
+                    headers={"Content-Type": "application/json"},
+                    method="POST",
+                )
+                with urllib.request.urlopen(request) as response:
+                    messages = json.load(response)["messages"]
+                self.assertIn("not conscious", messages[1]["content"].lower())
+                self.assertEqual(runtime.calls, 1)
             finally:
                 server.shutdown()
                 server.server_close()

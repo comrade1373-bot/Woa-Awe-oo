@@ -22,6 +22,12 @@
     button { color: inherit; background: #252c39; border: 1px solid #3c4658; border-radius: 8px; padding: 9px 12px; cursor: pointer; }
     button:hover { border-color: var(--accent); }
     #new-chat { width: 100%; margin-bottom: 12px; }
+    #knowledge-panel { margin: 10px 0 16px; color: var(--muted); font-size: .88rem; }
+    #knowledge-panel summary { cursor: pointer; color: var(--accent); }
+    #knowledge-files { width: 100%; margin: 8px 0; font: inherit; }
+    #knowledge-status { min-height: 20px; overflow-wrap: anywhere; }
+    #tool-actions { display: flex; flex-wrap: wrap; gap: 7px; max-width: 840px; margin: 0 auto 8px; }
+    #tool-actions button { padding: 6px 9px; font-size: .88rem; }
     #conversations { display: grid; gap: 6px; }
     .conversation { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .conversation.active { background: #303b50; border-color: var(--accent); }
@@ -49,6 +55,15 @@
   <aside>
     <h1>Woa-Awe-oo</h1>
     <button id="new-chat" type="button">＋ New conversation</button>
+    <details id="knowledge-panel">
+      <summary>Local knowledge library</summary>
+      <p>Add UTF-8 text, Markdown, JSON, CSV, or source-code files. Files stay local.</p>
+      <input id="knowledge-files" type="file" multiple
+        accept=".txt,.md,.rst,.py,.json,.csv" aria-label="Add local knowledge files">
+      <div id="knowledge-status" role="status"></div>
+      <p>Ask naturally, for example: “search my files for logistics” or
+        “summarize my documents about trade.” You can also use slash commands.</p>
+    </details>
     <nav id="conversations" aria-label="Conversations"></nav>
   </aside>
   <main>
@@ -56,8 +71,14 @@
     <div id="training-status" role="status">Loading local training telemetry…</div>
     <section id="messages" aria-live="polite"></section>
     <div class="composer">
+      <div id="tool-actions" role="group" aria-label="Local assistant tools">
+        <button type="button" data-command="/calc ">Calculate</button>
+        <button type="button" data-command="/search ">Search library</button>
+        <button type="button" data-command="/digest ">Digest sources</button>
+        <button type="button" data-command="/help">Help</button>
+      </div>
       <form id="composer">
-        <textarea id="input" placeholder="Message your local assistant…" aria-label="Message" required></textarea>
+        <textarea id="input" placeholder="Ask naturally, or use /calc, /search, /digest…" aria-label="Message" required></textarea>
         <button id="send" type="submit">Send</button>
       </form>
       <div id="status" role="status"></div>
@@ -70,8 +91,11 @@
     const modelStatusEl = document.querySelector("#model-status");
     const trainingStatusEl = document.querySelector("#training-status");
     const inputEl = document.querySelector("#input");
+    const knowledgeFilesEl = document.querySelector("#knowledge-files");
+    const knowledgeStatusEl = document.querySelector("#knowledge-status");
     let activeId = null;
     let knownMessageIds = "";
+    let sending = false;
 
     async function api(path, options = {}) {
       const response = await fetch(path, {
@@ -123,6 +147,7 @@
         api(`/api/conversations/${encodeURIComponent(id)}/messages`),
         refreshConversations()
       ]);
+      if (id !== activeId) return;
       renderMessages(messages);
     }
 
@@ -136,8 +161,10 @@
     }
 
     async function refreshMessages() {
-      if (!activeId) return;
-      const { messages } = await api(`/api/conversations/${encodeURIComponent(activeId)}/messages`);
+      const conversationId = activeId;
+      if (!conversationId) return;
+      const { messages } = await api(`/api/conversations/${encodeURIComponent(conversationId)}/messages`);
+      if (conversationId !== activeId) return;
       renderMessages(messages);
     }
 
@@ -146,7 +173,7 @@
       const hardware = health.hardware;
       const accelerator = hardware.accelerator ? ` (${hardware.accelerator})` : "";
       modelStatusEl.textContent = health.model_available
-        ? `Project-trained model checkpoint found on ${hardware.device}${accelerator}.`
+        ? `Experimental project model on ${hardware.device}${accelerator}. Deterministic local tools handle calculations, search, and source digests.`
         : `No trained project model yet. Hardware: ${hardware.device}${accelerator}. Train with \`python -m woa train --data PATH\`.`;
     }
 
@@ -164,6 +191,59 @@
       }
     }
 
+    knowledgeFilesEl.addEventListener("change", async () => {
+      const files = Array.from(knowledgeFilesEl.files || []);
+      if (!files.length) return;
+      if (files.length > 100) {
+        knowledgeStatusEl.textContent = "Select no more than 100 files at a time.";
+        knowledgeFilesEl.value = "";
+        return;
+      }
+      knowledgeFilesEl.disabled = true;
+      try {
+        for (const file of files) {
+          if (file.size > 400 * 1024) {
+            throw new Error(`${file.name} is larger than the 400 KiB browser upload limit.`);
+          }
+          knowledgeStatusEl.textContent = `Indexing ${file.name}…`;
+          const result = await api("/api/knowledge/documents", {
+            method: "POST",
+            body: JSON.stringify({ name: file.name, content: await file.text() })
+          });
+          knowledgeStatusEl.textContent =
+            `Indexed ${result.document.source} (${result.document.chunks} chunks).`;
+        }
+      } catch (error) {
+        knowledgeStatusEl.textContent = error.message;
+      } finally {
+        knowledgeFilesEl.disabled = false;
+        knowledgeFilesEl.value = "";
+      }
+    });
+
+    document.querySelectorAll("[data-command]").forEach(button => {
+      button.addEventListener("click", () => {
+        inputEl.value = button.dataset.command;
+        inputEl.focus();
+      });
+    });
+
+    async function syncClients() {
+      try {
+        await Promise.all([
+          refreshMessages(),
+          refreshConversations(),
+          refreshModelStatus(),
+          refreshTrainingStatus()
+        ]);
+        if (!sending) statusEl.textContent = "";
+      } catch (error) {
+        if (!sending) statusEl.textContent = `Sync error: ${error.message}`;
+      } finally {
+        window.setTimeout(syncClients, 1500);
+      }
+    }
+
     document.querySelector("#new-chat").addEventListener("click", () => {
       newConversation().catch(error => { statusEl.textContent = error.message; });
     });
@@ -172,7 +252,8 @@
       const content = inputEl.value.trim();
       if (!content || !activeId) return;
       inputEl.value = "";
-      statusEl.textContent = "Waiting for the local model…";
+      sending = true;
+      statusEl.textContent = "Processing locally…";
       document.querySelector("#send").disabled = true;
       try {
         await api(`/api/conversations/${encodeURIComponent(activeId)}/messages`, {
@@ -187,6 +268,7 @@
         await refreshMessages().catch(() => {});
         await refreshConversations().catch(() => {});
       } finally {
+        sending = false;
         document.querySelector("#send").disabled = false;
         inputEl.focus();
       }
@@ -196,18 +278,10 @@
       try {
         await refreshConversations();
         await Promise.all([refreshModelStatus(), refreshTrainingStatus()]);
-        setInterval(() => {
-          Promise.all([
-            refreshMessages(),
-            refreshConversations(),
-            refreshModelStatus(),
-            refreshTrainingStatus()
-          ])
-            .then(() => { statusEl.textContent = ""; })
-            .catch(error => { statusEl.textContent = `Sync error: ${error.message}`; });
-        }, 1500);
       } catch (error) {
         modelStatusEl.textContent = `Local service unavailable: ${error.message}`;
+      } finally {
+        window.setTimeout(syncClients, 1500);
       }
     }
     initialize();
