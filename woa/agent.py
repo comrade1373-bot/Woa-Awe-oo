@@ -62,7 +62,8 @@ _MATH_OPERATORS = (
 )
 _PURE_MATH = re.compile(r"[\d\s.+\-*/%()]+\Z")
 _HELP = re.compile(
-    r"^(?:/?(?:help|commands|tools)|what can (?:you|this assistant) do(?: for me)?"
+    r"^(?:/?(?:help|commands|tools)|what can (?:you|this assistant) "
+    r"(?:do(?: for me)?|help(?: me)?(?: with(?: .*)?)?)"
     r"|what tools do you have|show (?:me )?(?:the )?tools|list (?:the )?commands)[?.!]*$",
     re.IGNORECASE,
 )
@@ -84,6 +85,26 @@ _ENTROPY_QUERY = re.compile(
 _WEB_SEARCH = re.compile(
     r"^(?:please\s+)?(?:search|look\s+up)\s+(?:the\s+)?(?:web|internet|online)\b",
     re.IGNORECASE,
+)
+_MODEL_TOOL_CALL = re.compile(
+    r"\A\s*<tool>([a-z_]{1,64})\s+([\s\S]*?)</tool>\s*\Z"
+)
+_MODEL_TOOL_ALLOWLIST = frozenset(
+    {
+        "algebraic_solve",
+        "calculator",
+        "communication_cues",
+        "information_entropy",
+        "knowledge_digest",
+        "knowledge_search",
+        "local_environment",
+    }
+)
+_MODEL_TOOL_GUIDANCE = (
+    'Use at most one needed local tool: <tool>name {"key":"value"}</tool>. '
+    "calculator=expression; knowledge_search/knowledge_digest=query; "
+    "algebraic_solve=equation; information_entropy/communication_cues=text; "
+    "local_environment={}. No shell."
 )
 
 
@@ -137,7 +158,7 @@ class LocalAgent:
         return (
             "You can ask naturally, or use /calc EXPR, /search QUERY, "
             "/digest QUERY, /solve EQUATION, /entropy TEXT, /about, "
-            "or /tool NAME JSON. Local tools:\n"
+            "/cues TEXT, or /tool NAME JSON. Local tools:\n"
             + tools
         )
 
@@ -200,7 +221,7 @@ class LocalAgent:
             if additional:
                 sources += f", and {additional} more"
             return (
-                "I am Woa-Awe-oo, a local AI assistant. I am not conscious or "
+                "I am Woa, a local AI assistant. I am not conscious or "
                 "self-aware. “Mewtronic” is this project's name for composing "
                 "the local model, bundled and explicitly indexed knowledge, "
                 "and registered local tools; it does not mean I inspect the "
@@ -218,6 +239,10 @@ class LocalAgent:
             return self._help()
         if command == "/about":
             return self._run_tool("local_environment", {})
+        if command == "/cues":
+            if not argument.strip():
+                raise ValueError("Add text to label, for example: `/cues I'm not sure.`")
+            return self._run_tool("communication_cues", {"text": argument})
         if command in {"/solve", "/algebra"}:
             return self._run_tool(
                 "algebraic_solve", {"equation": argument.strip()}
@@ -319,4 +344,26 @@ class LocalAgent:
             raise ToolInvocationError(str(error)) from error
         if tool_reply is not None:
             return tool_reply
-        return self.runtime.generate(messages)
+        model_messages = [
+            *messages[:-1],
+            {"role": "system", "content": _MODEL_TOOL_GUIDANCE},
+            messages[-1],
+        ]
+        response = self.runtime.generate(model_messages)
+        tool_call = _MODEL_TOOL_CALL.fullmatch(response)
+        if tool_call is None:
+            return response
+        tool_name, raw_arguments = tool_call.groups()
+        if tool_name not in _MODEL_TOOL_ALLOWLIST:
+            raise ToolInvocationError(
+                f"The model requested unsupported local tool {tool_name!r}."
+            )
+        try:
+            arguments = json.loads(raw_arguments)
+            if not isinstance(arguments, dict):
+                raise ValueError("Tool arguments must be a JSON object.")
+            return self._run_tool(tool_name, arguments)
+        except (json.JSONDecodeError, ValueError) as error:
+            raise ToolInvocationError(
+                f"The model's {tool_name} request was rejected: {error}"
+            ) from error

@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="color-scheme" content="dark light">
-  <title>Woa-Awe-oo</title>
+  <title>Woa</title>
   <style>
     :root {
       font: 16px/1.5 system-ui, sans-serif;
@@ -15,12 +15,14 @@
       --accent: #9bb9ff;
     }
     * { box-sizing: border-box; }
-    body { margin: 0; height: 100vh; display: grid; grid-template-columns: 260px 1fr; }
+    body { margin: 0; height: 100vh; min-height: 560px; display: grid; grid-template-columns: 260px minmax(0, 1fr); }
     aside { padding: 20px 14px; background: var(--panel); border-right: 1px solid #303746; overflow: auto; }
     h1 { margin: 0 0 16px; font-size: 1.15rem; }
     button, textarea { font: inherit; }
     button { color: inherit; background: #252c39; border: 1px solid #3c4658; border-radius: 8px; padding: 9px 12px; cursor: pointer; }
     button:hover { border-color: var(--accent); }
+    button:focus-visible, textarea:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+    button:disabled { cursor: wait; opacity: .65; }
     #new-chat { width: 100%; margin-bottom: 12px; }
     #knowledge-panel { margin: 10px 0 16px; color: var(--muted); font-size: .88rem; }
     #knowledge-panel summary { cursor: pointer; color: var(--accent); }
@@ -31,29 +33,49 @@
     #conversations { display: grid; gap: 6px; }
     .conversation { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .conversation.active { background: #303b50; border-color: var(--accent); }
-    main { min-width: 0; display: flex; flex-direction: column; }
+    main { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
     header { min-height: 58px; padding: 14px 22px; border-bottom: 1px solid #303746; color: var(--muted); }
     #training-status { padding: 7px 22px; color: var(--muted); font-size: .88rem; border-bottom: 1px solid #303746; }
-    #messages { flex: 1; overflow: auto; padding: 24px max(20px, calc((100% - 800px) / 2)); }
-    .message { margin: 0 auto 18px; max-width: 800px; white-space: pre-wrap; overflow-wrap: anywhere; }
-    .message strong { display: block; color: var(--accent); margin-bottom: 4px; }
-    .composer { padding: 16px 20px 20px; border-top: 1px solid #303746; }
-    form { display: flex; gap: 10px; max-width: 840px; margin: auto; }
-    textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 200px; color: inherit; background: var(--panel); border: 1px solid #3c4658; border-radius: 8px; padding: 11px; }
+    #messages { flex: 1; min-height: 0; overflow: auto; padding: 24px max(20px, calc((100% - 840px) / 2)); scroll-behavior: smooth; }
+    .message { max-width: min(800px, 88%); margin-bottom: 16px; padding: 12px 16px; white-space: pre-wrap; overflow-wrap: anywhere; border: 1px solid #303746; }
+    .message.user { margin-left: auto; background: #24334b; border-color: #3a5278; border-radius: 18px 18px 4px 18px; }
+    .message.assistant { margin-right: auto; background: var(--panel); border-radius: 18px 18px 18px 4px; }
+    .message strong { display: block; color: var(--accent); margin-bottom: 4px; font-size: .88rem; }
+    .empty-state { max-width: 620px; margin: min(12vh, 100px) auto 0; padding: 24px; text-align: center; color: var(--muted); }
+    .empty-state h2 { margin: 0 0 8px; color: #e9edf5; font-size: 1.5rem; }
+    .empty-state p { margin: 0 auto 18px; }
+    .suggestions { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+    .suggestions button { font-size: .9rem; }
+    .composer { padding: 14px 20px max(16px, env(safe-area-inset-bottom)); border-top: 1px solid #303746; background: #10131a; }
+    form { display: flex; align-items: flex-end; gap: 10px; max-width: 840px; margin: auto; }
+    textarea { flex: 1; resize: none; min-height: 52px; max-height: 180px; overflow-y: auto; color: inherit; background: var(--panel); border: 1px solid #3c4658; border-radius: 14px; padding: 12px 14px; line-height: 1.45; }
+    textarea:focus { border-color: var(--accent); }
+    #send { min-height: 48px; min-width: 82px; background: #35496b; border-color: #516e9d; }
+    #composer-hint { max-width: 840px; margin: 6px auto 0; color: var(--muted); font-size: .78rem; }
     #status { max-width: 840px; min-height: 24px; margin: 5px auto 0; color: var(--muted); font-size: .88rem; }
     @media (max-width: 650px) {
-      body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      body { height: 100dvh; min-height: 0; grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
       aside { padding: 10px; border-right: 0; border-bottom: 1px solid #303746; }
       h1 { display: inline-block; margin: 0 12px 0 0; }
       #new-chat { width: auto; margin: 0; }
       #conversations { display: flex; overflow: auto; margin-top: 8px; }
       .conversation { max-width: 180px; }
+      header { padding: 10px 14px; }
+      #training-status { padding: 6px 14px; }
+      #messages { padding: 18px 12px; }
+      .message { max-width: 94%; }
+      .composer { padding: 10px 12px max(12px, env(safe-area-inset-bottom)); }
+      #tool-actions { flex-wrap: nowrap; overflow-x: auto; padding-bottom: 4px; }
+      #tool-actions button { flex: 0 0 auto; }
+      form { gap: 7px; }
+      textarea { min-height: 48px; padding: 10px; }
+      #send { min-width: 68px; }
     }
   </style>
 </head>
 <body>
   <aside>
-    <h1>Woa-Awe-oo</h1>
+    <h1>Woa</h1>
     <button id="new-chat" type="button">＋ New conversation</button>
     <details id="knowledge-panel">
       <summary>Local knowledge library</summary>
@@ -69,7 +91,7 @@
   <main>
     <header id="model-status" role="status">Connecting to local service…</header>
     <div id="training-status" role="status">Loading local training telemetry…</div>
-    <section id="messages" aria-live="polite"></section>
+    <section id="messages" aria-live="polite" aria-label="Conversation"></section>
     <div class="composer">
       <div id="tool-actions" role="group" aria-label="Local assistant tools">
         <button type="button" data-command="/calc ">Calculate</button>
@@ -78,9 +100,10 @@
         <button type="button" data-command="/help">Help</button>
       </div>
       <form id="composer">
-        <textarea id="input" placeholder="Ask naturally, or use /calc, /search, /digest…" aria-label="Message" required></textarea>
+        <textarea id="input" placeholder="Message Woa…" aria-label="Message" rows="1" required></textarea>
         <button id="send" type="submit">Send</button>
       </form>
+      <div id="composer-hint">Enter to send · Shift+Enter for a new line</div>
       <div id="status" role="status"></div>
     </div>
   </main>
@@ -94,7 +117,7 @@
     const knowledgeFilesEl = document.querySelector("#knowledge-files");
     const knowledgeStatusEl = document.querySelector("#knowledge-status");
     let activeId = null;
-    let knownMessageIds = "";
+    let knownMessageIds = null;
     let sending = false;
 
     async function api(path, options = {}) {
@@ -112,17 +135,51 @@
       if (signature === knownMessageIds) return;
       knownMessageIds = signature;
       messagesEl.replaceChildren();
+      if (!messages.length) {
+        const welcome = document.createElement("div");
+        welcome.className = "empty-state";
+        const title = document.createElement("h2");
+        title.textContent = "What would you like to explore?";
+        const description = document.createElement("p");
+        description.textContent =
+          "Ask a question, use a local tool, or search the knowledge you have added.";
+        const suggestions = document.createElement("div");
+        suggestions.className = "suggestions";
+        for (const [label, value] of [
+          ["What can you help me with?", "What can you help me with locally?"],
+          ["Calculate 2 + 2", "Calculate 2 plus 2"],
+          ["Search my library", "/search "]
+        ]) {
+          const button = document.createElement("button");
+          button.type = "button";
+          button.textContent = label;
+          button.addEventListener("click", () => {
+            inputEl.value = value;
+            resizeComposer();
+            inputEl.focus();
+          });
+          suggestions.append(button);
+        }
+        welcome.append(title, description, suggestions);
+        messagesEl.append(welcome);
+        return;
+      }
       for (const message of messages) {
         const article = document.createElement("article");
-        article.className = "message";
+        article.className = `message ${message.role === "user" ? "user" : "assistant"}`;
         const role = document.createElement("strong");
-        role.textContent = message.role === "user" ? "You" : "Woa-Awe-oo";
+        role.textContent = message.role === "user" ? "You" : "Woa";
         const content = document.createElement("div");
         content.textContent = message.content;
         article.append(role, content);
         messagesEl.append(article);
       }
       messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    function resizeComposer() {
+      inputEl.style.height = "auto";
+      inputEl.style.height = `${Math.min(inputEl.scrollHeight, 180)}px`;
     }
 
     async function refreshConversations() {
@@ -142,7 +199,7 @@
 
     async function selectConversation(id) {
       activeId = id;
-      knownMessageIds = "";
+      knownMessageIds = null;
       const [{ messages }] = await Promise.all([
         api(`/api/conversations/${encodeURIComponent(id)}/messages`),
         refreshConversations()
@@ -224,8 +281,17 @@
     document.querySelectorAll("[data-command]").forEach(button => {
       button.addEventListener("click", () => {
         inputEl.value = button.dataset.command;
+        resizeComposer();
         inputEl.focus();
       });
+    });
+
+    inputEl.addEventListener("input", resizeComposer);
+    inputEl.addEventListener("keydown", event => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        document.querySelector("#composer").requestSubmit();
+      }
     });
 
     async function syncClients() {
@@ -249,9 +315,11 @@
     });
     document.querySelector("#composer").addEventListener("submit", async event => {
       event.preventDefault();
+      if (sending) return;
       const content = inputEl.value.trim();
       if (!content || !activeId) return;
       inputEl.value = "";
+      resizeComposer();
       sending = true;
       statusEl.textContent = "Processing locally…";
       document.querySelector("#send").disabled = true;

@@ -1,12 +1,16 @@
 import argparse
+import importlib.util
 import os
+import sqlite3
+import sys
 import threading
 import time
 import webbrowser
+from importlib.resources import files as package_files
 from pathlib import Path
 
 from .alignment import train_dpo
-from .bundled_knowledge import seed_bundled_knowledge
+from .bundled_knowledge import BUNDLED_SOURCES, seed_bundled_knowledge
 from .client import api_url, request_json
 from .core import Store, data_directory, model_checkpoint_path
 from .corpus import download_starter_corpus
@@ -26,7 +30,7 @@ from .training import evaluate_checkpoint, train
 
 
 def print_message(message):
-    label = "you" if message["role"] == "user" else "Woa-Awe-oo"
+    label = "you" if message["role"] == "user" else "Woa"
     print(f"\n[{label}]\n{message['content']}\n", flush=True)
 
 
@@ -106,7 +110,8 @@ def interactive_chat():
     threading.Thread(target=sync_loop, daemon=True).start()
     print(
         f"Connected to {api_url()}. Commands: /new, /list, /use NUMBER, "
-        "/status, /events, /tools, /calc EXPR, /search QUERY, /digest QUERY, /quit. "
+        "/status, /events, /tools, /calc EXPR, /solve EQUATION, /entropy TEXT, "
+        "/search QUERY, /digest QUERY, /about, /cues TEXT, /quit. "
         "You can also ask to calculate, search your files, or summarize a topic."
     )
     try:
@@ -196,10 +201,50 @@ def interactive_chat():
 
 
 def run_diagnostics():
+    print(f"Python: {sys.version.split()[0]}")
+    try:
+        local_data = data_directory()
+        checkpoint = model_checkpoint_path()
+        missing_bundled = [
+            source["filename"]
+            for source in BUNDLED_SOURCES
+            if not (
+                package_files("woa")
+                .joinpath("data")
+                .joinpath("knowledge")
+                .joinpath(source["filename"])
+                .is_file()
+            )
+        ]
+        store = Store()
+        documents = KnowledgeIndex(store).list_documents()
+    except (OSError, RuntimeError, sqlite3.Error, ValueError) as error:
+        print(f"Local data store: unavailable ({error})")
+        print("Check write access to WOA_DATA_DIR and local SQLite/FTS5 support.")
+        return 1
+
+    print(f"Local data directory: {local_data}")
+    print(
+        f"Local SQLite/FTS5 store: ready ({len(documents)} indexed documents)"
+    )
+    print(
+        f"Bundled knowledge: {'ready' if not missing_bundled else 'incomplete'} "
+        f"({len(BUNDLED_SOURCES) - len(missing_bundled)}/{len(BUNDLED_SOURCES)} files)"
+    )
+    if missing_bundled:
+        print("Missing bundled files: " + ", ".join(missing_bundled))
+    print(
+        f"PyTorch: {'available' if importlib.util.find_spec('torch') else 'not installed'}"
+    )
+    print(
+        f"Model checkpoint: {'found' if checkpoint.is_file() else 'not found'} "
+        f"({checkpoint})"
+    )
+
     try:
         health = request_json("/api/health")
         tools = request_json("/api/tools")["tools"]
-        documents = request_json("/api/knowledge/documents")["documents"]
+        service_documents = request_json("/api/knowledge/documents")["documents"]
     except (RuntimeError, ValueError) as error:
         print(f"Local service: unavailable ({error})")
         print("Start it with `python -m woa start`.")
@@ -214,7 +259,7 @@ def run_diagnostics():
         f"compute: {hardware['device']}"
     )
     print("Local tools: " + ", ".join(tool["name"] for tool in tools))
-    print(f"Indexed knowledge documents: {len(documents)}")
+    print(f"Indexed knowledge documents: {len(service_documents)}")
     print("Service features: " + ", ".join(health.get("features", [])))
     print("Clients: web, desktop, CLI (shared service and conversation database)")
     return 0
@@ -320,6 +365,11 @@ def main():
     train_parser.add_argument("--width", type=int)
     train_parser.add_argument("--layers", type=int)
     train_parser.add_argument("--heads", type=int)
+    train_parser.add_argument(
+        "--exact-million",
+        action="store_true",
+        help="use the learned-position architecture with exactly 1,000,000 trainable parameters",
+    )
     train_parser.add_argument("--batch-size", type=int)
     train_parser.add_argument("--learning-rate", type=float, default=3e-4)
     train_parser.add_argument("--warmup-steps", type=int, default=50)
@@ -449,7 +499,7 @@ def main():
         except (OSError, RuntimeError, ValueError) as error:
             print(f"Cannot start service: {error}")
             return 1
-        print(f"Woa-Awe-oo service listening at http://{args.host}:{args.port}")
+        print(f"Woa service listening at http://{args.host}:{args.port}")
         try:
             server.serve_forever()
         except KeyboardInterrupt:
@@ -470,24 +520,44 @@ def main():
         recommendation = recommended_model_settings(profile)
         output_path = Path(args.output) if args.output else model_checkpoint_path()
         try:
+            explicit_dimensions = (
+                args.context_length,
+                args.width,
+                args.layers,
+                args.heads,
+            )
+            if args.exact_million and args.resume:
+                raise ValueError("--exact-million cannot be combined with --resume.")
+            if args.exact_million and any(
+                value is not None for value in explicit_dimensions
+            ):
+                raise ValueError(
+                    "Do not combine --exact-million with individual architecture dimensions."
+                )
             if args.resume and any(
                 value is not None
-                for value in (
-                    args.context_length,
-                    args.width,
-                    args.layers,
-                    args.heads,
-                )
+                for value in explicit_dimensions
             ):
                 raise ValueError(
                     "Do not override architecture dimensions when resuming."
                 )
-            config = None if args.resume else ModelConfig(
-                context_length=args.context_length or recommendation["context_length"],
-                d_model=args.width or recommendation["d_model"],
-                n_heads=args.heads or recommendation["n_heads"],
-                n_layers=args.layers or recommendation["n_layers"],
-            )
+            if args.resume:
+                config = None
+            elif args.exact_million:
+                config = ModelConfig(
+                    context_length=204,
+                    d_model=100,
+                    n_heads=5,
+                    n_layers=7,
+                    learned_position_embeddings=True,
+                )
+            else:
+                config = ModelConfig(
+                    context_length=args.context_length or recommendation["context_length"],
+                    d_model=args.width or recommendation["d_model"],
+                    n_heads=args.heads or recommendation["n_heads"],
+                    n_layers=args.layers or recommendation["n_layers"],
+                )
             accelerator = (
                 f" ({profile['accelerator']})" if profile["accelerator"] else ""
             )

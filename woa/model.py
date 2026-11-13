@@ -18,6 +18,7 @@ class ModelConfig:
     n_heads: int = 4
     n_layers: int = 4
     dropout: float = 0.0
+    learned_position_embeddings: bool = False
 
     def __post_init__(self):
         if self.vocab_size < 1:
@@ -156,6 +157,11 @@ def build_model(config=None):
             super().__init__()
             self.config = config
             self.token_embedding = nn.Embedding(config.vocab_size, config.d_model)
+            self.position_embedding = (
+                nn.Embedding(config.context_length, config.d_model)
+                if config.learned_position_embeddings
+                else None
+            )
             self.blocks = nn.ModuleList(Block() for _ in range(config.n_layers))
             self.final_norm = RMSNorm(config.d_model)
             self.lm_head = nn.Linear(config.d_model, config.vocab_size, bias=False)
@@ -173,6 +179,9 @@ def build_model(config=None):
             if token_ids.shape[1] > config.context_length:
                 raise ValueError("Input exceeds the model context length.")
             value = self.token_embedding(token_ids)
+            if self.position_embedding is not None:
+                positions = torch.arange(token_ids.shape[1], device=token_ids.device)
+                value = value + self.position_embedding(positions).unsqueeze(0)
             for block in self.blocks:
                 value = block(value)
             logits = self.lm_head(self.final_norm(value))
