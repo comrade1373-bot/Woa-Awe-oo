@@ -104,7 +104,8 @@ _MODEL_TOOL_ALLOWLIST = frozenset(
     }
 )
 _MODEL_TOOL_GUIDANCE = (
-    'Use at most one needed local tool: <tool>name {"key":"value"}</tool>. '
+    "Answer normally when no tool is needed; do not make tool use the default. "
+    'When useful, use at most one local tool: <tool>name {"key":"value"}</tool>. '
     "calculator=expression; knowledge_search/knowledge_digest=query; "
     "algebraic_solve=equation; information_entropy/communication_cues=text; "
     "local_environment={}. No shell."
@@ -230,12 +231,12 @@ class LocalAgent:
                 else "not reported"
             )
             return (
-                "I'm Woa, a local software assistant. I don't have biological "
-                "senses or feelings; this report uses only local app and "
-                "hardware signals. “Mewtronic” is this project's name for composing "
-                "the local model, bundled and explicitly indexed knowledge, "
-                "and registered local tools; it does not mean I inspect the "
-                "whole computer.\n"
+                "I am Woa, a local software assistant. I am not conscious, and I "
+                "don't have biological senses or feelings; this report uses only "
+                "local app and hardware signals. “Mewtronic” is this project's "
+                "name for composing the local model, bundled and explicitly "
+                "indexed knowledge, and registered local tools; it does not mean I "
+                "inspect the whole computer.\n"
                 f"Model checkpoint: {checkpoint_status}. "
                 f"Compute: {result['compute_device']} on {result['platform']}; "
                 f"{result['cpu_count']} logical CPUs; memory: {memory_status}.\n"

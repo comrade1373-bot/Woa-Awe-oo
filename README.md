@@ -105,6 +105,29 @@ PyTorch platform-specific installation instructions may vary. Choose a build
 compatible with your operating system and GPU; CPU training is supported but
 will be much slower.
 
+### Use a local pretrained chat model
+
+For general-purpose conversation, Woa can load a user-supplied,
+instruction-tuned Hugging Face causal language model from a local directory.
+Install the optional runtime:
+
+```sh
+python -m pip install -e ".[local-model]"
+```
+
+Set `WOA_MODEL_PATH` to a directory containing the model configuration,
+tokenizer, and weights, then start Woa:
+
+```sh
+WOA_MODEL_PATH=/path/to/local-instruct-model python -m woa start
+```
+
+The model must fit available memory and should include a chat template. Woa
+loads only files already present in that directory: it does not download model
+weights, execute remote model code, or call a hosted model API. Review the
+model's license and provenance before use. Pointing `WOA_MODEL_PATH` at a
+project-owned `.pt` checkpoint continues to use the from-scratch runtime.
+
 ## Train the project-owned model
 
 Put permitted training text in one or more `.txt` or `.md` files, then run:

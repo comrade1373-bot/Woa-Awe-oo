@@ -890,6 +890,85 @@ class FoundationTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch training extra not installed")
 class TransformerTests(unittest.TestCase):
+    def test_local_pretrained_runtime_uses_offline_chat_template(self):
+        import types
+        import torch
+
+        from woa.training import ModelRuntime
+
+        class FakeBatchEncoding:
+            def __init__(self, input_ids):
+                self.input_ids = input_ids
+
+            def __getitem__(self, key):
+                return getattr(self, key)
+
+        class FakeTokenizer:
+            chat_template = "test-template"
+            pad_token_id = 0
+            eos_token_id = 1
+            load_options = None
+            messages = None
+            template_options = None
+
+            @classmethod
+            def from_pretrained(cls, _path, **options):
+                cls.load_options = options
+                return cls()
+
+            def apply_chat_template(self, messages, **options):
+                type(self).messages = messages
+                type(self).template_options = options
+                return FakeBatchEncoding(torch.tensor([[2, 3, 4]]))
+
+            def decode(self, _tokens, **_options):
+                return "Hello! How can I help?"
+
+        class FakeModel:
+            config = type("Config", (), {"max_position_embeddings": 256})()
+            load_options = None
+            generation_options = None
+
+            @classmethod
+            def from_pretrained(cls, _path, **options):
+                cls.load_options = options
+                return cls()
+
+            def to(self, _device):
+                return self
+
+            def eval(self):
+                return self
+
+            def generate(self, input_ids, **options):
+                type(self).generation_options = options
+                new_tokens = torch.tensor([[8, 9]], device=input_ids.device)
+                return torch.cat((input_ids, new_tokens), dim=1)
+
+        transformers = types.ModuleType("transformers")
+        transformers.AutoTokenizer = FakeTokenizer
+        transformers.AutoModelForCausalLM = FakeModel
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_text("{}", encoding="utf-8")
+            runtime = ModelRuntime(directory)
+            with patch.dict(sys.modules, {"transformers": transformers}):
+                self.assertTrue(runtime.available)
+                self.assertEqual(runtime.backend, "local_pretrained")
+                reply = runtime.generate(
+                    [
+                        {"role": "system", "content": "Be clear."},
+                        {"role": "user", "content": "Hello"},
+                    ]
+                )
+
+        self.assertEqual(reply, "Hello! How can I help?")
+        self.assertEqual(FakeTokenizer.load_options["local_files_only"], True)
+        self.assertEqual(FakeModel.load_options["local_files_only"], True)
+        self.assertEqual(FakeTokenizer.messages[-1]["content"], "Hello")
+        self.assertTrue(FakeTokenizer().template_options["add_generation_prompt"])
+        self.assertTrue(FakeModel().generation_options["do_sample"])
+
     def test_exact_million_parameter_architecture_uses_learned_positions(self):
         import torch
 
@@ -1335,10 +1414,15 @@ class ApiTests(unittest.TestCase):
                     self.assertIn(b"empty-state", page)
                     self.assertIn(b"Enter to send", page)
                     self.assertIn(b"Shift+Enter", page)
+                    self.assertIn(
+                        b"General chat needs a local model.",
+                        page,
+                    )
                 with urllib.request.urlopen(base_url + "/api/health") as response:
                     health = json.load(response)
                 self.assertTrue(health["ok"])
                 self.assertFalse(health["model_available"])
+                self.assertEqual(health["model_backend"], "project_owned")
                 self.assertEqual(health["model_kind"], "project_trained_transformer")
                 self.assertIn("device", health["hardware"])
                 with urllib.request.urlopen(base_url + "/api/training/events") as response:
@@ -1377,7 +1461,9 @@ class ApiTests(unittest.TestCase):
                 with self.assertRaises(urllib.error.HTTPError) as error:
                     urllib.request.urlopen(send_request)
                 self.assertEqual(error.exception.code, 503)
-                self.assertIn(b"Train one", error.exception.read())
+                error_body = error.exception.read()
+                self.assertIn(b"local instruction/chat model directory", error_body)
+                self.assertIn(b"train one", error_body)
                 error.exception.close()
 
                 with urllib.request.urlopen(

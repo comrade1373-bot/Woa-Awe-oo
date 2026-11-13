@@ -229,9 +229,16 @@
       const health = await api("/api/health");
       const hardware = health.hardware;
       const accelerator = hardware.accelerator ? ` (${hardware.accelerator})` : "";
-      modelStatusEl.textContent = health.model_available
-        ? `Experimental project model on ${hardware.device}${accelerator}. Deterministic local tools handle calculations, search, and source digests.`
-        : `No trained project model yet. Hardware: ${hardware.device}${accelerator}. Train with \`python -m woa train --data PATH\`.`;
+      if (!health.model_available) {
+        modelStatusEl.textContent =
+          "General chat needs a local model. Set WOA_MODEL_PATH to a local instruction/chat model directory, or train the project model. Local tools still work.";
+      } else if (health.model_backend === "local_pretrained") {
+        modelStatusEl.textContent =
+          `Local pretrained chat model on ${hardware.device}${accelerator}.`;
+      } else {
+        modelStatusEl.textContent =
+          `Experimental project-owned model on ${hardware.device}${accelerator}. Local tools handle calculations, search, and source summaries.`;
+      }
     }
 
     async function refreshTrainingStatus() {
@@ -318,8 +325,6 @@
       if (sending) return;
       const content = inputEl.value.trim();
       if (!content || !activeId) return;
-      inputEl.value = "";
-      resizeComposer();
       sending = true;
       statusEl.textContent = "Processing locally…";
       document.querySelector("#send").disabled = true;
@@ -328,6 +333,10 @@
           method: "POST",
           body: JSON.stringify({ content })
         });
+        if (inputEl.value.trim() === content) {
+          inputEl.value = "";
+          resizeComposer();
+        }
         await refreshMessages();
         await refreshConversations();
         statusEl.textContent = "";

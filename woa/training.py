@@ -16,9 +16,11 @@ from .tokenizer import ByteTokenizer
 
 CHECKPOINT_FORMAT_VERSION = 1
 _CHAT_SYSTEM_PROMPT = (
-    "You are Woa, a local assistant. Be clear, specific, truthful, and "
-    "constructive. Admit uncertainty, ask when needed, and help users learn. "
-    "Never invent facts."
+    "You are Woa, a helpful general-purpose local assistant. Handle ordinary "
+    "conversation, explanations, planning, writing, and questions directly. "
+    "Use a local tool only when it materially helps. Be clear, specific, "
+    "truthful, and constructive. Admit uncertainty, ask when needed, and help "
+    "users learn. Never invent facts."
 )
 
 
@@ -506,6 +508,7 @@ class ModelRuntime:
     def __init__(self, checkpoint_path):
         self.checkpoint_path = Path(checkpoint_path)
         self._model = None
+        self._tokenizer = None
         self._device = None
         self._loaded_mtime = None
         self._context_length = None
@@ -514,13 +517,39 @@ class ModelRuntime:
 
     @property
     def available(self):
-        return self.checkpoint_path.is_file()
+        return self.checkpoint_path.is_file() or self.checkpoint_path.is_dir()
+
+    @property
+    def backend(self):
+        return (
+            "local_pretrained"
+            if self.checkpoint_path.is_dir()
+            else "project_owned"
+        )
+
+    def _path_mtime(self):
+        if self.checkpoint_path.is_file():
+            return self.checkpoint_path.stat().st_mtime_ns
+        files = [
+            path
+            for path in self.checkpoint_path.iterdir()
+            if path.is_file()
+            and (
+                path.name.endswith(".json")
+                or path.name.endswith(".safetensors")
+                or path.name.endswith(".bin")
+            )
+        ]
+        if not files:
+            return self.checkpoint_path.stat().st_mtime_ns
+        return max(path.stat().st_mtime_ns for path in files)
 
     def _load(self):
         if not self.available:
             raise RuntimeError(
-                "No project-trained model checkpoint found. Train one with "
-                "`python -m woa train --data PATH`."
+                f"No local model was found at {self.checkpoint_path}. Set "
+                "WOA_MODEL_PATH to a local instruction/chat model directory, or "
+                "train one with `python -m woa train --data PATH`."
             )
         try:
             import torch
@@ -531,7 +560,7 @@ class ModelRuntime:
             ) from error
         with self._load_lock:
             try:
-                checkpoint_mtime = self.checkpoint_path.stat().st_mtime_ns
+                checkpoint_mtime = self._path_mtime()
             except OSError as error:
                 raise RuntimeError(
                     f"Could not access model checkpoint at {self.checkpoint_path}."
@@ -540,31 +569,75 @@ class ModelRuntime:
                 return
             profile = detect_hardware()
             device = torch.device(profile["device"])
-            try:
-                checkpoint = torch.load(
-                    self.checkpoint_path, map_location="cpu", weights_only=True
+            tokenizer = None
+            if self.checkpoint_path.is_dir():
+                try:
+                    from transformers import AutoModelForCausalLM, AutoTokenizer
+                except ImportError as error:
+                    raise ModelDependencyError(
+                        "Transformers is required for a local pretrained model. "
+                        'Install it with `pip install -e ".[local-model]"`.'
+                    ) from error
+                try:
+                    tokenizer = AutoTokenizer.from_pretrained(
+                        self.checkpoint_path,
+                        local_files_only=True,
+                        trust_remote_code=False,
+                    )
+                    model = AutoModelForCausalLM.from_pretrained(
+                        self.checkpoint_path,
+                        local_files_only=True,
+                        trust_remote_code=False,
+                    )
+                    config = model.config
+                except (OSError, ValueError, AttributeError) as error:
+                    raise RuntimeError(
+                        "Could not load a local pretrained model from "
+                        f"{self.checkpoint_path}. Check that it contains a "
+                        "compatible tokenizer and causal language model."
+                    ) from error
+                context_length = next(
+                    (
+                        value
+                        for value in (
+                            getattr(config, "max_position_embeddings", None),
+                            getattr(config, "n_positions", None),
+                            getattr(config, "seq_length", None),
+                        )
+                        if isinstance(value, int) and value > 0
+                    ),
+                    4096,
                 )
-                if checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION:
-                    raise ValueError("Unsupported checkpoint format version.")
-                if checkpoint.get("tokenizer") != "byte-v1":
-                    raise ValueError("Unsupported checkpoint tokenizer.")
-                config = ModelConfig(**checkpoint["config"])
-                if config.vocab_size != ByteTokenizer.VOCAB_SIZE:
-                    raise ValueError("Checkpoint vocabulary does not match byte-v1.")
-                model = build_model(config)
-                model.load_state_dict(checkpoint["model"])
-            except (
-                OSError,
-                KeyError,
-                TypeError,
-                ValueError,
-                RuntimeError,
-                AttributeError,
-                pickle.UnpicklingError,
-            ) as error:
-                raise RuntimeError(
-                    f"Could not load model checkpoint at {self.checkpoint_path}."
-                ) from error
+            else:
+                try:
+                    checkpoint = torch.load(
+                        self.checkpoint_path, map_location="cpu", weights_only=True
+                    )
+                    if checkpoint.get("format_version") != CHECKPOINT_FORMAT_VERSION:
+                        raise ValueError("Unsupported checkpoint format version.")
+                    if checkpoint.get("tokenizer") != "byte-v1":
+                        raise ValueError("Unsupported checkpoint tokenizer.")
+                    config = ModelConfig(**checkpoint["config"])
+                    if config.vocab_size != ByteTokenizer.VOCAB_SIZE:
+                        raise ValueError(
+                            "Checkpoint vocabulary does not match byte-v1."
+                        )
+                    model = build_model(config)
+                    model.load_state_dict(checkpoint["model"])
+                except (
+                    OSError,
+                    KeyError,
+                    TypeError,
+                    ValueError,
+                    RuntimeError,
+                    AttributeError,
+                    pickle.UnpicklingError,
+                ) as error:
+                    raise RuntimeError(
+                        f"Could not load model checkpoint at {self.checkpoint_path}."
+                    ) from error
+                context_length = config.context_length
+
             previous_model = self._model
             previous_device = self._device
             if previous_model is not None:
@@ -582,13 +655,83 @@ class ModelRuntime:
             model.eval()
             self._device = device
             self._model = model
+            self._tokenizer = tokenizer
             self._loaded_mtime = checkpoint_mtime
-            self._context_length = config.context_length
+            self._context_length = context_length
 
     def generate(self, messages, max_new_tokens=128):
         with self._generation_lock:
             self._load()
             import torch
+
+            if self.backend == "local_pretrained":
+                tokenizer = self._tokenizer
+                prompt_messages = list(messages)
+                max_new_tokens = min(
+                    max_new_tokens, max(1, self._context_length - 1)
+                )
+                input_limit = self._context_length - max_new_tokens
+
+                def encode_prompt():
+                    if getattr(tokenizer, "chat_template", None):
+                        encoded = tokenizer.apply_chat_template(
+                            prompt_messages,
+                            tokenize=True,
+                            add_generation_prompt=True,
+                            return_tensors="pt",
+                        )
+                    else:
+                        prompt = "\n".join(
+                            f"{message['role'].capitalize()}: {message['content']}"
+                            for message in prompt_messages
+                        )
+                        prompt += "\nAssistant:"
+                        encoded = tokenizer(prompt, return_tensors="pt")["input_ids"]
+                    if isinstance(encoded, dict) or hasattr(encoded, "input_ids"):
+                        encoded = encoded["input_ids"]
+                    if encoded.ndim == 1:
+                        encoded = encoded.unsqueeze(0)
+                    return encoded
+
+                input_ids = encode_prompt()
+                while input_ids.shape[-1] > input_limit:
+                    removable = next(
+                        (
+                            index
+                            for index, message in enumerate(prompt_messages)
+                            if message.get("role") != "system"
+                            and index != len(prompt_messages) - 1
+                        ),
+                        None,
+                    )
+                    if removable is None:
+                        input_ids = input_ids[:, -input_limit:]
+                        break
+                    del prompt_messages[removable]
+                    input_ids = encode_prompt()
+
+                input_ids = input_ids.to(self._device)
+                attention_mask = torch.ones_like(input_ids)
+                output = self._model.generate(
+                    input_ids,
+                    attention_mask=attention_mask,
+                    max_new_tokens=max_new_tokens,
+                    do_sample=True,
+                    temperature=0.7,
+                    top_p=0.9,
+                    repetition_penalty=1.05,
+                    pad_token_id=tokenizer.pad_token_id
+                    if tokenizer.pad_token_id is not None
+                    else tokenizer.eos_token_id,
+                )[0, input_ids.shape[-1] :]
+                reply = tokenizer.decode(
+                    output, skip_special_tokens=True
+                ).strip()
+                if not reply:
+                    raise RuntimeError(
+                        "The local pretrained model returned an empty response."
+                    )
+                return reply
 
             tokenizer = ByteTokenizer()
             prompt = _build_inference_prompt(

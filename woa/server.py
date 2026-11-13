@@ -83,6 +83,9 @@ def handler_for(store, runtime=None):
                         "ok": True,
                         "model_available": runtime.available,
                         "model_kind": "project_trained_transformer",
+                        "model_backend": getattr(
+                            runtime, "backend", "project_owned"
+                        ),
                         "hardware": detect_hardware(),
                         "features": [
                             "shared_conversations",

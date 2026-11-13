@@ -11,6 +11,7 @@ requires-python = ">=3.10"
 
 [project.optional-dependencies]
 train = ["torch>=2.6"]
+local-model = ["torch>=2.6", "transformers>=4.45"]
 
 [project.scripts]
 woa = "woa.cli:main"

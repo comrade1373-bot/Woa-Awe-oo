@@ -39,9 +39,16 @@ def interactive_chat():
     try:
         health = request_json("/api/health")
         print(
-            "Experimental project model checkpoint found."
+            (
+                "Local pretrained chat model found."
+                if health.get("model_backend") == "local_pretrained"
+                else "Experimental project model checkpoint found."
+            )
             if health["model_available"]
-            else "No project-trained model yet; train one with `python -m woa train --data PATH`."
+            else (
+                "No local model found. Set WOA_MODEL_PATH to a local instruction/chat "
+                "model directory, or train one with `python -m woa train --data PATH`."
+            )
         )
         conversations = request_json("/api/conversations")["conversations"]
         if conversations:
@@ -238,7 +245,7 @@ def run_diagnostics():
         f"PyTorch: {'available' if importlib.util.find_spec('torch') else 'not installed'}"
     )
     print(
-        f"Model checkpoint: {'found' if checkpoint.is_file() else 'not found'} "
+        f"Model checkpoint: {'found' if checkpoint.exists() else 'not found'} "
         f"({checkpoint})"
     )
 

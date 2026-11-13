@@ -91,11 +91,12 @@ class DesktopClient:
             accelerator = (
                 f" ({hardware['accelerator']})" if hardware["accelerator"] else ""
             )
-            text = (
-                f"Experimental project model on {hardware['device']}{accelerator}"
-                if health["model_available"]
-                else f"No trained model yet; compute device: {hardware['device']}{accelerator}"
-            )
+            if not health["model_available"]:
+                text = "No local model found; general chat needs a model."
+            elif health.get("model_backend") == "local_pretrained":
+                text = f"Local pretrained chat model on {hardware['device']}{accelerator}"
+            else:
+                text = f"Experimental project model on {hardware['device']}{accelerator}"
             self.model_status.config(text=text)
         except RuntimeError as error:
             self.model_status.config(text=str(error))
