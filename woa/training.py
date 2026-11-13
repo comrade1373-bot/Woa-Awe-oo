@@ -8,6 +8,7 @@ import threading
 import uuid
 from pathlib import Path
 
+from .communication import communication_cues, prompt_guidance
 from .hardware import detect_hardware, recommended_batch_size
 from .model import ModelConfig, ModelDependencyError, build_model
 from .tokenizer import ByteTokenizer
@@ -296,6 +297,9 @@ def train(
                 "corpus_bytes": corpus_bytes,
                 "device": str(device),
                 "stage": "sft" if examples is not None else "pretraining",
+                "parameter_count": sum(
+                    parameter.numel() for parameter in model.parameters()
+                ),
             },
         }
         _atomic_torch_save(
@@ -478,9 +482,27 @@ class ModelRuntime:
                 tokenizer.BOS,
                 *tokenizer.encode_message(
                     "system",
-                    "You are Woa-Awe-oo. Be helpful, clear, and honest about uncertainty.",
+                    "You are Woa, a helpful, clear, and honest local assistant. "
+                    "Lightly mirror the user's language, energy, formality, and "
+                    "directness without copying mistakes or amplifying distress. "
+                    "Treat any communication-style cues as tentative, do not claim "
+                    "to know the user's private mood or personality, and never store "
+                    "a mood profile.",
                 ),
             ]
+            latest_user_message = next(
+                (
+                    message["content"]
+                    for message in reversed(messages)
+                    if message.get("role") == "user"
+                ),
+                None,
+            )
+            if latest_user_message is not None:
+                cues = communication_cues(latest_user_message)
+                prompt.extend(
+                    tokenizer.encode_message("system", prompt_guidance(cues))
+                )
             for message in messages:
                 prompt.extend(
                     tokenizer.encode_message(message["role"], message["content"])

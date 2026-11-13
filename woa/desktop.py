@@ -10,17 +10,18 @@ class DesktopClient:
 
         self.tk = tk
         self.root = tk.Tk()
-        self.root.title("Woa-Awe-oo")
+        self.root.title("Woa")
         self.root.geometry("900x650")
+        self.root.minsize(720, 500)
         self.active_id = None
-        self.message_signature = ""
+        self.message_signature = None
         self.conversation_ids = []
 
         self.root.columnconfigure(1, weight=1)
         self.root.rowconfigure(0, weight=1)
         sidebar = tk.Frame(self.root, padx=10, pady=10)
         sidebar.grid(row=0, column=0, sticky="ns")
-        tk.Label(sidebar, text="Woa-Awe-oo", font=("", 14, "bold")).pack(
+        tk.Label(sidebar, text="Woa", font=("", 14, "bold")).pack(
             anchor="w", pady=(0, 10)
         )
         tk.Button(sidebar, text="＋ New conversation", command=self.new_conversation).pack(
@@ -38,7 +39,26 @@ class DesktopClient:
         self.model_status.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         self.training_status = tk.Label(main, anchor="w", fg="#536581")
         self.training_status.grid(row=1, column=0, sticky="ew", pady=(0, 8))
-        self.messages = scrolledtext.ScrolledText(main, wrap="word", state="disabled")
+        self.messages = scrolledtext.ScrolledText(
+            main, wrap="word", state="disabled", padx=14, pady=14
+        )
+        self.messages.tag_configure(
+            "user_label", foreground="#5478ae", font=("TkDefaultFont", 10, "bold")
+        )
+        self.messages.tag_configure(
+            "assistant_label",
+            foreground="#526f9d",
+            font=("TkDefaultFont", 10, "bold"),
+        )
+        self.messages.tag_configure(
+            "user_content", lmargin1=12, lmargin2=12, rmargin=24, spacing3=12
+        )
+        self.messages.tag_configure(
+            "assistant_content", lmargin1=12, lmargin2=12, rmargin=12, spacing3=12
+        )
+        self.messages.tag_configure(
+            "empty_state", foreground="#68758a", justify="center", spacing1=18
+        )
         self.messages.grid(row=2, column=0, sticky="nsew")
         composer = tk.Frame(main)
         composer.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -48,6 +68,12 @@ class DesktopClient:
         self.input.bind("<Control-Return>", self.on_send_shortcut)
         self.send_button = tk.Button(composer, text="Send", command=self.send_message)
         self.send_button.grid(row=0, column=1, sticky="ns")
+        tk.Label(
+            composer,
+            text="Enter for a new line · Ctrl+Enter to send",
+            anchor="w",
+            fg="#536581",
+        ).grid(row=1, column=0, columnspan=2, sticky="ew", pady=(5, 0))
         self.status = tk.Label(main, text="", anchor="w", fg="#a04d4d")
         self.status.grid(row=4, column=0, sticky="ew", pady=(6, 0))
 
@@ -133,7 +159,7 @@ class DesktopClient:
 
     def select_conversation(self, conversation_id):
         self.active_id = conversation_id
-        self.message_signature = ""
+        self.message_signature = None
         self.refresh_messages()
 
     def new_conversation(self):
@@ -167,9 +193,19 @@ class DesktopClient:
         self.message_signature = signature
         self.messages.config(state="normal")
         self.messages.delete("1.0", "end")
+        if not messages:
+            self.messages.insert(
+                "end",
+                "Start a conversation\nAsk a question, calculate, or search your local library.",
+                "empty_state",
+            )
         for item in messages:
-            name = "You" if item["role"] == "user" else "Woa-Awe-oo"
-            self.messages.insert("end", f"{name}\n{item['content']}\n\n")
+            name = "You" if item["role"] == "user" else "Woa"
+            role = "user" if item["role"] == "user" else "assistant"
+            self.messages.insert("end", f"{name}\n", f"{role}_label")
+            self.messages.insert(
+                "end", f"{item['content']}\n\n", f"{role}_content"
+            )
         self.messages.config(state="disabled")
         self.messages.see("end")
 
@@ -192,9 +228,18 @@ class DesktopClient:
                     f"/api/conversations/{conversation_id}/messages",
                     {"content": content},
                 )
+                self.root.after(0, self.refresh_messages)
                 self.root.after(0, lambda: self.status.config(text=""))
             except RuntimeError as error:
                 self.root.after(0, lambda message=str(error): self.status.config(text=message))
+                def restore_input():
+                    if conversation_id != self.active_id:
+                        return
+                    current = self.input.get("1.0", "end-1c")
+                    self.input.insert("1.0", content + ("\n" if current else ""))
+                    self.input.focus_set()
+
+                self.root.after(0, restore_input)
             finally:
                 self.root.after(0, lambda: self.send_button.config(state="normal"))
 

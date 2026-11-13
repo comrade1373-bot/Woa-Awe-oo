@@ -6,6 +6,7 @@ import platform
 import re
 from pathlib import Path
 
+from .communication import communication_cues
 from .hardware import detect_hardware
 
 _NAME = re.compile(r"[a-z][a-z0-9_]{0,63}\Z")
@@ -388,6 +389,16 @@ def build_tool_bus(knowledge, runtime=None):
         lambda text: information_entropy(text),
     )
     bus.register(
+        "communication_cues",
+        "Return transient heuristic labels for a message's intent, register, tone words, and rhetorical markers.",
+        {
+            "type": "object",
+            "properties": {"text": {"type": "string", "maxLength": 5000}},
+            "required": ["text"],
+        },
+        lambda text: communication_cues(text),
+    )
+    bus.register(
         "knowledge_search",
         "Search locally indexed text and return ranked excerpts with source citations.",
         {
@@ -413,7 +424,7 @@ def build_tool_bus(knowledge, runtime=None):
         hardware = detect_hardware()
         sources = [Path(document["source"]).name for document in documents[:50]]
         return {
-            "assistant": "Woa-Awe-oo",
+            "assistant": "Woa",
             "mewtronic_definition": (
                 "Composition of this local model, bundled knowledge, explicitly "
                 "indexed documents, and registered local tools."

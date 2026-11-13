@@ -17,6 +17,7 @@ from unittest.mock import MagicMock, Mock, patch
 
 from woa.agent import LocalAgent, ToolInvocationError
 from woa.bundled_knowledge import BUNDLED_SOURCES, seed_bundled_knowledge
+from woa.communication import communication_cues
 from woa.client import request_json
 from woa.cli import (
     launch_application,
@@ -142,6 +143,18 @@ class KnowledgeTests(unittest.TestCase):
 
 
 class ToolTests(unittest.TestCase):
+    def test_communication_cues_are_explicit_and_non_persistent(self):
+        cues = communication_cues(
+            "Please help ASAP; this is the best ever, like a rocket! 😂"
+        )
+
+        self.assertEqual(cues["intent"], "request")
+        self.assertIn("urgency_words", cues["tone_cues"])
+        self.assertIn("playful_marker", cues["tone_cues"])
+        self.assertIn("possible_hyperbole", cues["rhetorical_cues"])
+        self.assertFalse(cues["persistent_profile"])
+        self.assertEqual(cues["certainty"], "heuristic")
+
     def test_calculator_supports_arithmetic_and_rejects_code(self):
         self.assertEqual(calculate("2 + 3 * 4"), 14)
         self.assertEqual(calculate("-(8 / 2)"), -4.0)
@@ -213,6 +226,13 @@ class ToolTests(unittest.TestCase):
                 ],
                 1.0,
             )
+            self.assertEqual(
+                bus.invoke(
+                    "communication_cues",
+                    {"text": "Please help ASAP."},
+                )["tone_cues"],
+                ["urgency_words", "polite_marker"],
+            )
             with self.assertRaisesRegex(ValueError, "Missing tool arguments"):
                 bus.invoke("calculator", {})
             with self.assertRaisesRegex(ValueError, "Unknown tool"):
@@ -245,6 +265,52 @@ class ToolTests(unittest.TestCase):
                 agent.reply([{"role": "user", "content": "What is 2 plus 2?"}]),
                 "4",
             )
+            labels = agent.reply(
+                [{"role": "user", "content": "/cues I'm not sure; maybe later."}]
+            )
+            self.assertIn('"intent": "statement"', labels)
+            self.assertIn("uncertainty_words", labels)
+            with self.assertRaisesRegex(ToolInvocationError, "Add text to label"):
+                agent.reply([{"role": "user", "content": "/cues"}])
+            help_reply = agent.reply(
+                [
+                    {
+                        "role": "user",
+                        "content": "What can you help me with locally?",
+                    }
+                ]
+            )
+            self.assertIn("You can ask naturally", help_reply)
+            self.assertIn("/cues TEXT", help_reply)
+            self.assertEqual(runtime.calls, 0)
+
+            class ToolCallingRuntime:
+                calls = []
+
+                def generate(self, messages):
+                    self.calls.append(messages)
+                    return '<tool>calculator {"expression":"6 * 7"}</tool>'
+
+            tool_runtime = ToolCallingRuntime()
+            tool_agent = LocalAgent(tool_runtime, bus)
+            self.assertEqual(
+                tool_agent.reply(
+                    [{"role": "user", "content": "I need an arithmetic result."}]
+                ),
+                "42",
+            )
+            self.assertEqual(len(tool_runtime.calls), 1)
+            self.assertEqual(tool_runtime.calls[0][-2]["role"], "system")
+            self.assertIn("<tool>", tool_runtime.calls[0][-2]["content"])
+
+            class InvalidToolCallingRuntime:
+                def generate(self, _messages):
+                    return '<tool>run_shell {"command":"id"}</tool>'
+
+            with self.assertRaisesRegex(ToolInvocationError, "unsupported local tool"):
+                LocalAgent(InvalidToolCallingRuntime(), bus).reply(
+                    [{"role": "user", "content": "Do something local."}]
+                )
             self.assertIn(
                 '"result": 42',
                 agent.reply(
@@ -380,6 +446,23 @@ class CliKnowledgeTests(unittest.TestCase):
                         self.assertEqual(cli_main(), 0)
                     self.assertIn(str(document), output.getvalue())
                     self.assertIn("cited knowledge snippets", output.getvalue())
+
+    def test_doctor_reports_local_readiness_when_service_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with patch.dict(os.environ, {"WOA_DATA_DIR": directory}):
+                with patch(
+                    "woa.cli.request_json",
+                    side_effect=RuntimeError("Cannot connect to local service."),
+                ):
+                    with contextlib.redirect_stdout(io.StringIO()) as output:
+                        result = run_diagnostics()
+
+        self.assertEqual(result, 1)
+        report = output.getvalue()
+        self.assertIn("Local SQLite/FTS5 store: ready", report)
+        self.assertIn("Bundled knowledge: ready (8/8 files)", report)
+        self.assertIn("Local service: unavailable", report)
+        self.assertIn("python -m woa start", report)
 
 
 class LaunchTests(unittest.TestCase):
@@ -713,6 +796,25 @@ class FoundationTests(unittest.TestCase):
 
 @unittest.skipUnless(importlib.util.find_spec("torch"), "PyTorch training extra not installed")
 class TransformerTests(unittest.TestCase):
+    def test_exact_million_parameter_architecture_uses_learned_positions(self):
+        import torch
+
+        from woa.model import build_model
+
+        config = ModelConfig(
+            context_length=204,
+            d_model=100,
+            n_heads=5,
+            n_layers=7,
+            learned_position_embeddings=True,
+        )
+        model = build_model(config)
+        parameter_count = sum(parameter.numel() for parameter in model.parameters())
+
+        self.assertEqual(parameter_count, 1_000_000)
+        logits = model(torch.tensor([[1, 2, 3]]))
+        self.assertEqual(tuple(logits.shape), (1, 3, config.vocab_size))
+
     def test_causal_forward_backward_and_generation(self):
         import torch
 
@@ -996,6 +1098,7 @@ class ApiTests(unittest.TestCase):
                         "knowledge_search",
                         "knowledge_digest",
                         "local_environment",
+                        "communication_cues",
                     },
                 )
 
@@ -1133,7 +1236,11 @@ class ApiTests(unittest.TestCase):
             base_url = f"http://127.0.0.1:{server.server_port}"
             try:
                 with urllib.request.urlopen(base_url) as response:
-                    self.assertIn(b"<title>Woa-Awe-oo</title>", response.read())
+                    page = response.read()
+                    self.assertIn(b"<title>Woa</title>", page)
+                    self.assertIn(b"empty-state", page)
+                    self.assertIn(b"Enter to send", page)
+                    self.assertIn(b"Shift+Enter", page)
                 with urllib.request.urlopen(base_url + "/api/health") as response:
                     health = json.load(response)
                 self.assertTrue(health["ok"])
