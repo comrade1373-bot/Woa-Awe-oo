@@ -1,0 +1,216 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark light">
+  <title>Woa-Awe-oo</title>
+  <style>
+    :root {
+      font: 16px/1.5 system-ui, sans-serif;
+      color: #e9edf5;
+      background: #10131a;
+      --panel: #191e28;
+      --muted: #9da8ba;
+      --accent: #9bb9ff;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; height: 100vh; display: grid; grid-template-columns: 260px 1fr; }
+    aside { padding: 20px 14px; background: var(--panel); border-right: 1px solid #303746; overflow: auto; }
+    h1 { margin: 0 0 16px; font-size: 1.15rem; }
+    button, textarea { font: inherit; }
+    button { color: inherit; background: #252c39; border: 1px solid #3c4658; border-radius: 8px; padding: 9px 12px; cursor: pointer; }
+    button:hover { border-color: var(--accent); }
+    #new-chat { width: 100%; margin-bottom: 12px; }
+    #conversations { display: grid; gap: 6px; }
+    .conversation { text-align: left; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .conversation.active { background: #303b50; border-color: var(--accent); }
+    main { min-width: 0; display: flex; flex-direction: column; }
+    header { min-height: 58px; padding: 14px 22px; border-bottom: 1px solid #303746; color: var(--muted); }
+    #training-status { padding: 7px 22px; color: var(--muted); font-size: .88rem; border-bottom: 1px solid #303746; }
+    #messages { flex: 1; overflow: auto; padding: 24px max(20px, calc((100% - 800px) / 2)); }
+    .message { margin: 0 auto 18px; max-width: 800px; white-space: pre-wrap; overflow-wrap: anywhere; }
+    .message strong { display: block; color: var(--accent); margin-bottom: 4px; }
+    .composer { padding: 16px 20px 20px; border-top: 1px solid #303746; }
+    form { display: flex; gap: 10px; max-width: 840px; margin: auto; }
+    textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 200px; color: inherit; background: var(--panel); border: 1px solid #3c4658; border-radius: 8px; padding: 11px; }
+    #status { max-width: 840px; min-height: 24px; margin: 5px auto 0; color: var(--muted); font-size: .88rem; }
+    @media (max-width: 650px) {
+      body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; }
+      aside { padding: 10px; border-right: 0; border-bottom: 1px solid #303746; }
+      h1 { display: inline-block; margin: 0 12px 0 0; }
+      #new-chat { width: auto; margin: 0; }
+      #conversations { display: flex; overflow: auto; margin-top: 8px; }
+      .conversation { max-width: 180px; }
+    }
+  </style>
+</head>
+<body>
+  <aside>
+    <h1>Woa-Awe-oo</h1>
+    <button id="new-chat" type="button">＋ New conversation</button>
+    <nav id="conversations" aria-label="Conversations"></nav>
+  </aside>
+  <main>
+    <header id="model-status" role="status">Connecting to local service…</header>
+    <div id="training-status" role="status">Loading local training telemetry…</div>
+    <section id="messages" aria-live="polite"></section>
+    <div class="composer">
+      <form id="composer">
+        <textarea id="input" placeholder="Message your local assistant…" aria-label="Message" required></textarea>
+        <button id="send" type="submit">Send</button>
+      </form>
+      <div id="status" role="status"></div>
+    </div>
+  </main>
+  <script>
+    const conversationsEl = document.querySelector("#conversations");
+    const messagesEl = document.querySelector("#messages");
+    const statusEl = document.querySelector("#status");
+    const modelStatusEl = document.querySelector("#model-status");
+    const trainingStatusEl = document.querySelector("#training-status");
+    const inputEl = document.querySelector("#input");
+    let activeId = null;
+    let knownMessageIds = "";
+
+    async function api(path, options = {}) {
+      const response = await fetch(path, {
+        ...options,
+        headers: { "Content-Type": "application/json", ...options.headers }
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || `Request failed (${response.status})`);
+      return data;
+    }
+
+    function renderMessages(messages) {
+      const signature = messages.map(message => message.id).join(",");
+      if (signature === knownMessageIds) return;
+      knownMessageIds = signature;
+      messagesEl.replaceChildren();
+      for (const message of messages) {
+        const article = document.createElement("article");
+        article.className = "message";
+        const role = document.createElement("strong");
+        role.textContent = message.role === "user" ? "You" : "Woa-Awe-oo";
+        const content = document.createElement("div");
+        content.textContent = message.content;
+        article.append(role, content);
+        messagesEl.append(article);
+      }
+      messagesEl.scrollTop = messagesEl.scrollHeight;
+    }
+
+    async function refreshConversations() {
+      const { conversations } = await api("/api/conversations");
+      conversationsEl.replaceChildren();
+      for (const conversation of conversations) {
+        const button = document.createElement("button");
+        button.className = `conversation${conversation.id === activeId ? " active" : ""}`;
+        button.textContent = conversation.title;
+        button.title = conversation.title;
+        button.onclick = () => selectConversation(conversation.id);
+        conversationsEl.append(button);
+      }
+      if (!activeId && conversations.length) await selectConversation(conversations[0].id);
+      if (!activeId && !conversations.length) await newConversation();
+    }
+
+    async function selectConversation(id) {
+      activeId = id;
+      knownMessageIds = "";
+      const [{ messages }] = await Promise.all([
+        api(`/api/conversations/${encodeURIComponent(id)}/messages`),
+        refreshConversations()
+      ]);
+      renderMessages(messages);
+    }
+
+    async function newConversation() {
+      const { conversation } = await api("/api/conversations", {
+        method: "POST",
+        body: JSON.stringify({ title: "New conversation" })
+      });
+      await selectConversation(conversation.id);
+      inputEl.focus();
+    }
+
+    async function refreshMessages() {
+      if (!activeId) return;
+      const { messages } = await api(`/api/conversations/${encodeURIComponent(activeId)}/messages`);
+      renderMessages(messages);
+    }
+
+    async function refreshModelStatus() {
+      const health = await api("/api/health");
+      const hardware = health.hardware;
+      const accelerator = hardware.accelerator ? ` (${hardware.accelerator})` : "";
+      modelStatusEl.textContent = health.model_available
+        ? `Project-trained model checkpoint found on ${hardware.device}${accelerator}.`
+        : `No trained project model yet. Hardware: ${hardware.device}${accelerator}. Train with \`python -m woa train --data PATH\`.`;
+    }
+
+    async function refreshTrainingStatus() {
+      const { events } = await api("/api/training/events");
+      const step = events.find(event => event.event_type === "training_step");
+      if (step) {
+        trainingStatusEl.textContent =
+          `Training telemetry: step ${step.payload.step}/${step.payload.total_steps}, ` +
+          `loss ${Number(step.payload.loss).toFixed(4)}, device ${step.payload.device}.`;
+      } else if (events.length) {
+        trainingStatusEl.textContent = `Latest training event: ${events[0].event_type}.`;
+      } else {
+        trainingStatusEl.textContent = "No local training telemetry yet.";
+      }
+    }
+
+    document.querySelector("#new-chat").addEventListener("click", () => {
+      newConversation().catch(error => { statusEl.textContent = error.message; });
+    });
+    document.querySelector("#composer").addEventListener("submit", async event => {
+      event.preventDefault();
+      const content = inputEl.value.trim();
+      if (!content || !activeId) return;
+      inputEl.value = "";
+      statusEl.textContent = "Waiting for the local model…";
+      document.querySelector("#send").disabled = true;
+      try {
+        await api(`/api/conversations/${encodeURIComponent(activeId)}/messages`, {
+          method: "POST",
+          body: JSON.stringify({ content })
+        });
+        await refreshMessages();
+        await refreshConversations();
+        statusEl.textContent = "";
+      } catch (error) {
+        statusEl.textContent = error.message;
+        await refreshMessages().catch(() => {});
+        await refreshConversations().catch(() => {});
+      } finally {
+        document.querySelector("#send").disabled = false;
+        inputEl.focus();
+      }
+    });
+
+    async function initialize() {
+      try {
+        await refreshConversations();
+        await Promise.all([refreshModelStatus(), refreshTrainingStatus()]);
+        setInterval(() => {
+          Promise.all([
+            refreshMessages(),
+            refreshConversations(),
+            refreshModelStatus(),
+            refreshTrainingStatus()
+          ])
+            .then(() => { statusEl.textContent = ""; })
+            .catch(error => { statusEl.textContent = `Sync error: ${error.message}`; });
+        }, 1500);
+      } catch (error) {
+        modelStatusEl.textContent = `Local service unavailable: ${error.message}`;
+      }
+    }
+    initialize();
+  </script>
+</body>
+</html>
