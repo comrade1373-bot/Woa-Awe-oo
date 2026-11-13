@@ -88,11 +88,15 @@ def handler_for(store, runtime=None):
                     with hardware_lock:
                         if hardware is None:
                             hardware = detect_hardware()
+                model_available = runtime.available
                 self.send_json(
                     200,
                     {
                         "ok": True,
-                        "model_available": runtime.available,
+                        "model_available": model_available,
+                        "model_message": getattr(
+                            runtime, "readiness_message", None
+                        ),
                         "model_kind": "project_trained_transformer",
                         "model_backend": getattr(
                             runtime, "backend", "project_owned"

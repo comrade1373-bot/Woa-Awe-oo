@@ -28,6 +28,7 @@ from woa.cli import (
 )
 from woa.core import Store
 from woa.corpus import _nasa_abstract_text, _world_bank_text, download_starter_corpus
+from woa.desktop import DesktopClient
 from woa.datasets import (
     build_preference_examples,
     build_sft_examples,
@@ -512,6 +513,7 @@ class CliKnowledgeTests(unittest.TestCase):
         report = output.getvalue()
         self.assertIn("Local SQLite/FTS5 store: ready", report)
         self.assertIn("Bundled knowledge: ready (8/8 files)", report)
+        self.assertIn("Model readiness: No local model was found", report)
         self.assertIn("Local service: unavailable", report)
         self.assertIn("python -m woa start", report)
 
@@ -588,6 +590,41 @@ class LaunchTests(unittest.TestCase):
                         self.assertEqual(run_diagnostics(), 0)
                     self.assertIn("calculator, knowledge_search", output.getvalue())
                     self.assertIn("Indexed knowledge documents: 1", output.getvalue())
+
+
+class DesktopTests(unittest.TestCase):
+    def test_health_message_is_shown_when_model_is_unavailable(self):
+        client = DesktopClient.__new__(DesktopClient)
+        client.model_status = Mock()
+        with patch(
+            "woa.desktop.request_json",
+            return_value={
+                "model_available": False,
+                "model_message": "Transformers is required.",
+                "hardware": {"accelerator": None, "device": "cpu"},
+            },
+        ):
+            client.refresh_health()
+
+        client.model_status.config.assert_called_once_with(
+            text="Transformers is required."
+        )
+
+    def test_health_message_falls_back_when_model_message_is_missing(self):
+        client = DesktopClient.__new__(DesktopClient)
+        client.model_status = Mock()
+        with patch(
+            "woa.desktop.request_json",
+            return_value={
+                "model_available": False,
+                "hardware": {"accelerator": None, "device": "cpu"},
+            },
+        ):
+            client.refresh_health()
+
+        client.model_status.config.assert_called_once_with(
+            text="No local model found; general chat needs a model."
+        )
 
 
 class FoundationTests(unittest.TestCase):
@@ -988,6 +1025,8 @@ class TransformerTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "config.json").write_text("{}", encoding="utf-8")
+            Path(directory, "model.safetensors").write_bytes(b"test weights")
+            Path(directory, "tokenizer.json").write_text("{}", encoding="utf-8")
             runtime = ModelRuntime(directory)
             with patch.dict(sys.modules, {"transformers": transformers}):
                 self.assertTrue(runtime.available)
@@ -1006,6 +1045,54 @@ class TransformerTests(unittest.TestCase):
         self.assertTrue(FakeTokenizer().template_options["add_generation_prompt"])
         self.assertTrue(FakeModel().generation_options["do_sample"])
         self.assertEqual(FakeModel.generation_options["max_new_tokens"], 256)
+
+    def test_local_pretrained_runtime_reports_missing_model_artifacts(self):
+        from woa.training import ModelRuntime
+
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = ModelRuntime(directory)
+
+            self.assertFalse(runtime.available)
+            self.assertIn("config.json", runtime.readiness_message)
+            self.assertIn("model weights", runtime.readiness_message)
+            self.assertIn("tokenizer files", runtime.readiness_message)
+
+    def test_local_pretrained_runtime_reports_missing_optional_dependency(self):
+        from woa.training import ModelRuntime
+
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "config.json").write_text("{}", encoding="utf-8")
+            Path(directory, "model.safetensors").write_bytes(b"test weights")
+            Path(directory, "tokenizer.json").write_text("{}", encoding="utf-8")
+            runtime = ModelRuntime(directory)
+
+            def available_torch_only(module_name):
+                return object() if module_name == "torch" else None
+
+            with (
+                patch.dict(sys.modules, {"transformers": None}),
+                patch(
+                    "woa.training.importlib.util.find_spec",
+                    side_effect=available_torch_only,
+                ),
+            ):
+                self.assertFalse(runtime.available)
+                self.assertIn("Transformers is required", runtime.readiness_message)
+
+    def test_model_runtime_reports_missing_torch_dependency(self):
+        from woa.training import ModelRuntime
+
+        with tempfile.TemporaryDirectory() as directory:
+            checkpoint = Path(directory, "model.pt")
+            checkpoint.write_bytes(b"test checkpoint")
+            runtime = ModelRuntime(checkpoint)
+
+            with (
+                patch.dict(sys.modules, {"torch": None}),
+                patch("woa.training.importlib.util.find_spec", return_value=None),
+            ):
+                self.assertFalse(runtime.available)
+                self.assertIn("PyTorch is required", runtime.readiness_message)
 
     def test_exact_million_parameter_architecture_uses_learned_positions(self):
         import torch
@@ -1448,10 +1535,30 @@ class ApiTests(unittest.TestCase):
             try:
                 with urllib.request.urlopen(base_url) as response:
                     page = response.read()
+                    self.assertTrue(
+                        response.headers["Content-Type"].startswith("text/html")
+                    )
                     self.assertIn(b"<title>Woa</title>", page)
                     self.assertIn(b"empty-state", page)
                     self.assertIn(b"Enter to send", page)
                     self.assertIn(b"Shift+Enter", page)
+                    self.assertIn(b'<body class="no-effects large-chat-text">', page)
+                    self.assertIn(b"effects: false", page)
+                    self.assertIn(b"largeText: true", page)
+                    for control in (
+                        b'id="new-chat"',
+                        b'id="knowledge-files"',
+                        b'id="effects-toggle"',
+                        b'id="compact-toggle"',
+                        b'id="large-text-toggle"',
+                        b'data-command="/calc "',
+                        b'data-command="/search "',
+                        b'data-command="/digest "',
+                        b'data-command="/help"',
+                        b'id="send" type="submit"',
+                    ):
+                        with self.subTest(control=control):
+                            self.assertIn(control, page)
                     self.assertIn(
                         b"General chat needs a local model.",
                         page,
@@ -1469,9 +1576,15 @@ class ApiTests(unittest.TestCase):
                     self.assertEqual(response.headers["Content-Encoding"], "gzip")
                     self.assertIn(b"<title>Woa</title>", gzip.decompress(response.read()))
                 with urllib.request.urlopen(base_url + "/api/health") as response:
+                    self.assertTrue(
+                        response.headers["Content-Type"].startswith(
+                            "application/json"
+                        )
+                    )
                     health = json.load(response)
                 self.assertTrue(health["ok"])
                 self.assertFalse(health["model_available"])
+                self.assertIn("Set WOA_MODEL_PATH", health["model_message"])
                 self.assertEqual(health["model_backend"], "project_owned")
                 self.assertEqual(health["model_kind"], "project_trained_transformer")
                 self.assertIn("device", health["hardware"])

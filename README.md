@@ -127,6 +127,9 @@ loads only files already present in that directory: it does not download model
 weights, execute remote model code, or call a hosted model API. Review the
 model's license and provenance before use. Pointing `WOA_MODEL_PATH` at a
 project-owned `.pt` checkpoint continues to use the from-scratch runtime.
+`woa doctor` checks the local path, model weights, tokenizer files, and required
+optional runtime packages. This is a structural readiness check; loading and
+hardware compatibility are verified only when you send the first chat message.
 
 ## Train the project-owned model
 

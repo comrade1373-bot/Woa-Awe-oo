@@ -1,7 +1,9 @@
 import hashlib
+import importlib.util
 import math
 import os
 import pickle
+import sys
 import tempfile
 import time
 import threading
@@ -504,9 +506,92 @@ class ModelRuntime:
         self._load_lock = threading.Lock()
         self._generation_lock = threading.Lock()
 
+    def _dependency_available(self, module_name):
+        if sys.modules.get(module_name) is not None:
+            return True
+        try:
+            return importlib.util.find_spec(module_name) is not None
+        except (ImportError, ValueError):
+            return False
+
+    def _readiness(self):
+        if not self.checkpoint_path.exists():
+            return (
+                False,
+                f"No local model was found at {self.checkpoint_path}. Set "
+                "WOA_MODEL_PATH to a local instruction/chat model directory, or "
+                "train one with `python -m woa train --data PATH`.",
+            )
+        if self.checkpoint_path.is_dir():
+            try:
+                files = {
+                    path.name
+                    for path in self.checkpoint_path.iterdir()
+                    if path.is_file()
+                }
+            except OSError:
+                return (
+                    False,
+                    f"Could not read local model directory at {self.checkpoint_path}.",
+                )
+            missing = []
+            if "config.json" not in files:
+                missing.append("config.json")
+            if not any(
+                name.endswith((".safetensors", ".bin")) for name in files
+            ):
+                missing.append("model weights (.safetensors or .bin)")
+            if not files.intersection(
+                {
+                    "tokenizer.json",
+                    "tokenizer.model",
+                    "spiece.model",
+                    "vocab.json",
+                    "vocab.txt",
+                    "sentencepiece.bpe.model",
+                }
+            ):
+                missing.append("tokenizer files")
+            if missing:
+                return (
+                    False,
+                    "Local model directory is incomplete; missing "
+                    + ", ".join(missing)
+                    + ".",
+                )
+        elif not self.checkpoint_path.is_file():
+            return (
+                False,
+                f"Local model path is not a file or directory: {self.checkpoint_path}.",
+            )
+
+        if not self._dependency_available("torch"):
+            return (
+                False,
+                "PyTorch is required for local model inference. "
+                'Install it with `pip install -e ".[train]"`.',
+            )
+        if self.checkpoint_path.is_dir() and not self._dependency_available(
+            "transformers"
+        ):
+            return (
+                False,
+                "Transformers is required for a local pretrained model. "
+                'Install it with `pip install -e ".[local-model]"`.',
+            )
+        return (
+            True,
+            "Local model files and runtime dependencies are present; model loading "
+            "will be verified on first use.",
+        )
+
+    @property
+    def readiness_message(self):
+        return self._readiness()[1]
+
     @property
     def available(self):
-        return self.checkpoint_path.is_file() or self.checkpoint_path.is_dir()
+        return self._readiness()[0]
 
     @property
     def backend(self):
@@ -535,11 +620,7 @@ class ModelRuntime:
 
     def _load(self):
         if not self.available:
-            raise RuntimeError(
-                f"No local model was found at {self.checkpoint_path}. Set "
-                "WOA_MODEL_PATH to a local instruction/chat model directory, or "
-                "train one with `python -m woa train --data PATH`."
-            )
+            raise RuntimeError(self.readiness_message)
         try:
             import torch
         except ImportError as error:

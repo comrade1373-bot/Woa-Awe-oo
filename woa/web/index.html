@@ -492,7 +492,7 @@
     }
   </style>
 </head>
-<body>
+<body class="no-effects large-chat-text">
   <aside>
     <h1>Woa</h1>
     <div class="brand-kicker">LOCAL ASSISTANT / ON-DEVICE NODE</div>
@@ -513,7 +513,7 @@
           <span>Ambient effects</span>
           <small>Animated glow and motion</small>
         </span>
-        <input id="effects-toggle" type="checkbox" checked>
+        <input id="effects-toggle" type="checkbox">
       </label>
       <label class="setting-row" for="compact-toggle">
         <span class="setting-copy">
@@ -527,7 +527,7 @@
           <span>Larger message text</span>
           <small>Increase chat response readability</small>
         </span>
-        <input id="large-text-toggle" type="checkbox">
+        <input id="large-text-toggle" type="checkbox" checked>
       </label>
       <div id="settings-status" role="status" aria-live="polite"></div>
       <p class="settings-note">Saved in this browser only.</p>
@@ -674,12 +674,10 @@
     }
 
     function loadInterfaceSettings() {
-      const prefersReducedMotion =
-        window.matchMedia("(prefers-reduced-motion: reduce)").matches;
       const defaults = {
-        effects: !prefersReducedMotion,
+        effects: false,
         compact: false,
-        largeText: false
+        largeText: true
       };
       let saved;
       try {
@@ -770,7 +768,7 @@
       const hardware = health.hardware;
       const accelerator = hardware.accelerator ? ` (${hardware.accelerator})` : "";
       if (!health.model_available) {
-        modelStatusEl.textContent =
+        modelStatusEl.textContent = health.model_message ||
           "General chat needs a local model. Your local tools are ready—try Calculate or Search below.";
       } else if (health.model_backend === "local_pretrained") {
         modelStatusEl.textContent =

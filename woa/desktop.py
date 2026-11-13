@@ -92,7 +92,9 @@ class DesktopClient:
                 f" ({hardware['accelerator']})" if hardware["accelerator"] else ""
             )
             if not health["model_available"]:
-                text = "No local model found; general chat needs a model."
+                text = health.get("model_message") or (
+                    "No local model found; general chat needs a model."
+                )
             elif health.get("model_backend") == "local_pretrained":
                 text = f"Local pretrained chat model on {hardware['device']}{accelerator}"
             else:

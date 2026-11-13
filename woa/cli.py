@@ -27,7 +27,7 @@ from .knowledge import KnowledgeIndex
 from .model import ModelConfig
 from .server import create_server, start_server_in_thread
 from .sources import MAX_SOURCE_BYTES, fetch_public_text
-from .training import evaluate_checkpoint, train
+from .training import ModelRuntime, evaluate_checkpoint, train
 
 
 def print_message(message):
@@ -248,6 +248,7 @@ def run_diagnostics():
         f"Model checkpoint: {'found' if checkpoint.exists() else 'not found'} "
         f"({checkpoint})"
     )
+    print(f"Model readiness: {ModelRuntime(checkpoint).readiness_message}")
 
     try:
         health = request_json("/api/health")
